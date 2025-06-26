@@ -90,8 +90,24 @@ Once all prerequisites are met and dependencies are installed:
 After initiation, the program is designed to automate the trading process by fetching real-time data, making trading decisions, and executing orders. It is intended to run autonomously.
 
 However, please be aware that despite automation, bugs or unexpected market conditions might occasionally leave positions unclosed. It is highly recommended to monitor the program's activity and your brokerage account regularly.
+**Disclaimer 1**
+I have the $250 AV API key, which allows for 4 calls per second, if you purchase a cheaper plan, you will have to edit exe_params specifially  
+```
+            time.sleep(5)
 
-**Disclaimer:**
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    finally:
+        print("\n--- Initiating Shutdown Sequence ---")
+        if app.isConnected():
+            app.liquidate_all_positions()
+        app.disconnect()
+        print("Disconnected from TWS.")
+``` 
+into a higher sleep time to accomodate for your lower frequency data availability, hoever the code still works, it will jsut harass AV client for rejections until your allocation becomes available. 
+
+
+**Disclaimer 2**
 I take no responsibility for the profitability, negligence, or any losses/gains incurred from the use of this software. Always exercise caution and understand the risks involved in automated trading.
 
 **Follow updates on blendingwaves.com for further information.**
