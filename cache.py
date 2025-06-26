@@ -17,7 +17,8 @@ from urllib.parse import urlencode, parse_qs
 import copy
 
 
-
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 
@@ -251,4 +252,123 @@ class RealTimeInferenceEngine:
             accuracy_logits = self.accuracy_model(x).squeeze()
             
             return profit_logits, accuracy_logits
+        
+    
+    def visualize_inference_tensor(self, inference_item: np.ndarray, file_name: str):
+        """
+        Generates and saves a discrete heatmap of the feature tensor.
+
+        Args:
+            inference_item (np.ndarray): The (time_steps, num_features) tensor to plot.
+            file_name (str): The name of the image file to save (e.g., 'cold_start_heatmap.png').
+        """
+        print(f"\nGenerating heatmap of the feature tensor, shape: {inference_item.shape}...")
+        
+        # We transpose the matrix so features are on the Y-axis and time is on the X-axis
+        data_to_plot = inference_item.T  # Shape becomes (num_features, time_steps)
+
+        # Set a dynamic figure size. Height depends on the number of features.
+        # Adjust the numbers as needed for your screen/preference.
+        height = max(10, len(self.params) / 4) # at least 10 inches tall
+        width = 15
+        
+        fig, ax = plt.subplots(figsize=(width, height))
+        
+        # Use seaborn to create the heatmap.
+        # 'coolwarm' is great for data centered around zero, like your normalized features.
+        sns.heatmap(data_to_plot, 
+                    ax=ax,
+                    yticklabels=self.params, # Use feature names as Y-axis labels
+                    xticklabels=False,      # Hide the X-axis labels (too many time steps)
+                    cmap='coolwarm',        # Color scheme
+                    cbar=True)              # Show the color bar legend
+
+        ax.set_title('Feature Tensor Heatmap at Cold Start', fontsize=16)
+        ax.set_xlabel(f'Time Steps ({self.context_depth} mins)')
+        ax.set_ylabel('Features')
+        
+        # Ensure labels aren't cut off
+        plt.tight_layout()
+        
+        try:
+            plt.savefig(file_name, dpi=150) # Save the plot to a file
+            print(f"✅ Heatmap saved successfully to '{file_name}'")
+        except Exception as e:
+            print(f"❌ Failed to save heatmap. Error: {e}")
+        
+        plt.close() # Close the plot to free up memory
+    # Add this new method inside your RealTimeInferenceEngine class
+
+    def visualize_ohlcv_buffers(self, file_name: str = 'ohlcv_buffers_visualization.png'):
+        """
+        Generates and saves line plots of the raw OHLCV data stored in the
+        engine's buffers after cold start.
+        """
+        print(f"\nGenerating visualization of the OHLCV data buffers...")
+
+        num_tickers = len(self.tickers)
+        if num_tickers == 0:
+            print("No tickers to visualize.")
+            return
+
+        # Create a tall figure with one subplot for each ticker
+        fig, axes = plt.subplots(
+            nrows=num_tickers,
+            ncols=1,
+            figsize=(15, 6 * num_tickers), # 6 inches of height per ticker
+            squeeze=False # Ensures axes is always a 2D array
+        )
+        axes = axes.flatten() # Flatten to a 1D array for easy iteration
+
+        for i, ticker in enumerate(self.tickers):
+            ax = axes[i]
+            
+            # --- Extract Data for this Ticker ---
+            # Convert deques to lists for plotting
+            try:
+                close_data = list(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=CLOSE"])
+                open_data = list(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=OPEN"])
+                high_data = list(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=HIGH"])
+                low_data = list(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=LOW"])
+                volume_data = list(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=VOLUME"])
+            except KeyError as e:
+                print(f"Data not found for {ticker} in buffer, skipping plot. Error: {e}")
+                continue
+
+            if not close_data:
+                ax.set_title(f'{ticker} OHLCV Buffer Data - NO DATA FOUND', color='red')
+                continue
+                
+            # --- Plot Price Data (OHLC) ---
+            ax.plot(close_data, label='Close', color='blue', linewidth=2)
+            ax.plot(open_data, label='Open', color='black', linestyle='--', alpha=0.7)
+            ax.plot(high_data, label='High', color='green', linestyle=':', alpha=0.6)
+            ax.plot(low_data, label='Low', color='red', linestyle=':', alpha=0.6)
+            
+            ax.set_title(f'{ticker} OHLCV Buffer Data', fontsize=16)
+            ax.set_ylabel('Price ($)', color='blue')
+            ax.grid(True, linestyle='--', alpha=0.6)
+
+            # --- Plot Volume Data on a Second Y-Axis ---
+            ax2 = ax.twinx() # Create a second y-axis that shares the same x-axis
+            ax2.bar(range(len(volume_data)), volume_data, label='Volume', color='grey', alpha=0.2)
+            ax2.set_ylabel('Volume', color='grey')
+            
+            # --- Create a single, combined legend for both axes ---
+            lines, labels = ax.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines + lines2, labels + labels2, loc='upper left')
+
+        # Adjust layout to prevent titles and labels from overlapping
+        plt.tight_layout(pad=3.0)
+        
+        try:
+            plt.savefig(file_name, dpi=150)
+            print(f"✅ OHLCV buffer visualization saved successfully to '{file_name}'")
+        except Exception as e:
+            print(f"❌ Failed to save OHLCV visualization. Error: {e}")
+            
+        plt.close() # Close the plot to free up memory
+
+
 

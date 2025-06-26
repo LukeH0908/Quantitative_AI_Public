@@ -9,7 +9,7 @@ from ibapi.execution import Execution
 from ibapi.contract import ComboLeg
 from datetime import datetime, timedelta
 from av_client import av_client
-from cache import process_REALTIME_BULK_QUOTES,RealTimeInferenceEngine
+from cache2 import process_REALTIME_BULK_QUOTES,RealTimeInferenceEngine
 from ibapi.order import Order
 from ibapi.order_condition import TimeCondition
 import sys
@@ -309,20 +309,20 @@ def main():
     params = sorted(params)
 
     # --- App and Threading Setup ---
-    app = TradeApp(max_exposure_limit=maximum_exposure)
-    app.connect("127.0.0.1", 7496, clientId=1)
+    # app = TradeApp(max_exposure_limit=maximum_exposure)
+    # app.connect("127.0.0.1", 7496, clientId=0)
     
-    api_thread = threading.Thread(target=app.run, daemon=True)
-    api_thread.start()
-    print("Connecting to TWS...")
-    time.sleep(2)
+    # api_thread = threading.Thread(target=app.run, daemon=True)
+    # api_thread.start()
+    # print("Connecting to TWS...")
+    # time.sleep(2)
 
     # if app.isConnected():
     #     app.liquidate_all_positions()
 
-    if app.nextOrderId is None:
-        print("Could not connect to TWS or get nextValidId. Exiting.")
-        return
+    # if app.nextOrderId is None:
+    #     print("Could not connect to TWS or get nextValidId. Exiting.")
+    #     return
 
     # --- Engine and State Initialization ---
     inference_engine = RealTimeInferenceEngine(tickers, profit_model_path, accuracy_model_path, context_depth, params)
@@ -337,14 +337,15 @@ def main():
     # --- Main Real-Time Loop ---
     print("\n--- Starting High-Frequency Inference & Trading Loop ---")
     try:
-        while  is_market_open():
+        while is_market_open():
             now_utc = datetime.now(timezone.utc)
             
-            # --- NEW: Call the position manager at the start of each cycle ---
-            manage_expired_positions(app, forecast_depth)
+            # # --- NEW: Call the position manager at the start of each cycle ---
+            # manage_expired_positions(app, forecast_depth)
             
             # --- State Update and Data Fetching ---
-            update_flag = (now_utc.second >= 55 and now_utc.minute != last_permanent_update_minute)
+            # update_flag = (now_utc.second >= 55 and now_utc.minute != last_permanent_update_minute)
+            update_flag = True
             if update_flag: last_permanent_update_minute = now_utc.minute
 
             trading_data = process_REALTIME_BULK_QUOTES(
@@ -359,45 +360,48 @@ def main():
 
             # --- Perform Inference ---
             inference_item = inference_engine.update_hot_tensor_and_return_inference_item(trading_data, update=update_flag)
+            inference_engine.visualize_inference_tensor(inference_item, "ouput_inference_tensor.png")
+            inference_engine.visualize_ohlcv_buffers( "ouput_ohlcv_buffer.png")
             profit_logits, accuracy_logits = inference_engine.infer(inference_item)
 
             # --- Trading Logic ---
             print(f"\n--- Cycle at {now_utc.strftime('%H:%M:%S')} UTC ---")
             for i, ticker in enumerate(inference_engine.tickers):
-                if now_utc < trade_cooldown_expiry[ticker]: continue
-                
                 profit_signal = profit_logits[i].item()
                 accuracy_signal = accuracy_logits[i].item()
                 
                 print(f"  Signals for {ticker}: Profit={profit_signal:.4f}, Accuracy={accuracy_signal:.4f}")
                 
+                if now_utc < trade_cooldown_expiry[ticker]: continue
+                
+
                 if profit_signal > 0 and accuracy_signal > 0:
                     print(f"  >>> ✅ Agreement found! Attempting trade for {ticker}")
                     entry_price = round(trading_data[ticker]["close"], 2)
                     
-                    parent_order_id = app.place_bracket_order(
-                        ticker=ticker, take_profit_float=take_profit, stop_loss_float=stop_loss,
-                        entry_price=entry_price, quantity=order_quantity
-                    )
+                    # parent_order_id = app.place_bracket_order_with_maturity(
+                    #     ticker=ticker, take_profit_float=take_profit, stop_loss_float=stop_loss,
+                    #     entry_price=entry_price, quantity=order_quantity
+                    # )
                     
-                    if parent_order_id:
-                        print(f"    --> ✅ Bracket order submitted with Parent ID: {parent_order_id}")
-                        expiry_time = now_utc + timedelta(seconds=frequency_limiter_seconds)
-                        trade_cooldown_expiry[ticker] = expiry_time
-                        print(f"    --> ⏳ {ticker} is now in cooldown until {expiry_time.strftime('%H:%M:%S')} UTC.")
-                    else:
-                        print(f"    --> ℹ️ Order for {ticker} was not submitted (risk limits, etc.).")
+                    # if parent_order_id:
+                    #     print(f"    --> ✅ Bracket order submitted with Parent ID: {parent_order_id}")
+                    #     expiry_time = now_utc + timedelta(seconds=frequency_limiter_seconds)
+                    #     trade_cooldown_expiry[ticker] = expiry_time
+                    #     print(f"    --> ⏳ {ticker} is now in cooldown until {expiry_time.strftime('%H:%M:%S')} UTC.")
+                    # else:
+                    #     print(f"    --> ℹ️ Order for {ticker} was not submitted (risk limits, etc.).")
             
-            time.sleep(5)
+            time.sleep(3)
 
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
         print("\n--- Initiating Shutdown Sequence ---")
-        if app.isConnected():
-            app.liquidate_all_positions()
-        app.disconnect()
-        print("Disconnected from TWS.")
+        # if app.isConnected():
+        #     app.liquidate_all_positions()
+        # app.disconnect()
+        # print("Disconnected from TWS.")
 
 
         
