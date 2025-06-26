@@ -114,7 +114,7 @@ I take no responsibility for the profitability, negligence, or any losses/gains 
 
 
 
-**Current stats**
+**Current stats, Explained by Gemini for those unfamiliar with Machine Learning Classes/Labels**
 
 
  Model Performance Report
