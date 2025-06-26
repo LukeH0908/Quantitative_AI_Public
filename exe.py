@@ -337,7 +337,7 @@ def main():
     # --- Main Real-Time Loop ---
     print("\n--- Starting High-Frequency Inference & Trading Loop ---")
     try:
-        while not is_market_open():
+        while  is_market_open():
             now_utc = datetime.now(timezone.utc)
             
             # --- NEW: Call the position manager at the start of each cycle ---
