@@ -9,16 +9,20 @@ from ibapi.execution import Execution
 from ibapi.contract import ComboLeg
 from datetime import datetime, timedelta
 from av_client import av_client
-from cache2 import process_REALTIME_BULK_QUOTES,RealTimeInferenceEngine
+from cache import process_REALTIME_BULK_QUOTES,RealTimeInferenceEngine
 from ibapi.order import Order
 from ibapi.order_condition import TimeCondition
+import sys
+
 
 import time
 import pytz
 import json
 import time
 from datetime import datetime, timedelta, time as dt_time, timezone
-import pytz
+import os 
+import csv
+
 def is_market_open() -> bool:
     """Checks if the current time is within regular NYSE trading hours."""
     eastern = pytz.timezone('US/Eastern')
@@ -45,6 +49,8 @@ class TradeApp(EWrapper, EClient):
         self.order_placement_lock = threading.Lock()
         self.exposure_lock = threading.Lock()
         self.position_lock = threading.Lock()
+        
+
 
     def orderStatus(self, orderId: OrderId, status: str, filled: float, remaining: float, avgFillPrice: float, permId: int, parentId: int, lastFillPrice: float, clientId: int, whyHeld: str, mktCappedPrice: float):
         print(f"OrderStatus - Id: {orderId}, Status: {status}, Filled: {filled}")
@@ -65,41 +71,29 @@ class TradeApp(EWrapper, EClient):
             executed_value = execution.shares * execution.price
             
             if execution.side == "BOT":
-                print(f"📈 BUY Executed. Adding ${executed_value:.2f} to exposure.")
                 self.current_exposure += executed_value
-                
-                # --- NEW: Finalize the position entry with its expiry clock ---
                 parent_order_id = execution.orderId
                 if parent_order_id in self.pending_orders:
                     details = self.pending_orders.pop(parent_order_id)
                     self.open_positions[contract.symbol] = {
                         'shares': execution.shares,
                         'value': executed_value,
-                        'entry_time': datetime.now(timezone.utc), # Start the clock!
+                        'entry_time': datetime.now(timezone.utc),
                         'tp_id': details['tp_id'],
                         'sl_id': details['sl_id']
                     }
-                    print(f"  -> Position {contract.symbol} is now active with expiry tracking.")
 
             elif execution.side == "SLD":
-                print(f"📉 SELL Executed. Reducing exposure.")
                 if contract.symbol in self.open_positions:
                     position = self.open_positions[contract.symbol]
                     avg_cost = position['value'] / position['shares'] if position['shares'] > 0 else 0
                     value_to_remove = execution.shares * avg_cost
                     self.current_exposure -= value_to_remove
-                    
                     position['shares'] -= execution.shares
                     position['value'] -= value_to_remove
-                    
-                    # If this sell order closed the position, remove it
                     if position['shares'] <= 0:
-                        print(f"  -> Position {contract.symbol} is now fully closed.")
                         del self.open_positions[contract.symbol]
-            
-            print(f"Exposure Status: Current = ${self.current_exposure:.2f} | Max = ${self.max_exposure:.2f}")
-
-
+        
 
     def error(self, reqId: int, errorCode: int, errorString: str, advancedOrderRejectJson=""):
         if errorCode not in [2104, 2106, 2158, 2107]:
@@ -293,7 +287,9 @@ def manage_expired_positions(app: TradeApp, forecast_depth_minutes: int):
                     sl_id=data['sl_id']
                 )
 
+
 def main():
+    
     config_filepath = sys.argv[1]
     with open(config_filepath, 'r', encoding='utf-8') as f:
         known = json.load(f)
@@ -321,16 +317,16 @@ def main():
     print("Connecting to TWS...")
     time.sleep(2)
 
-    if app.isConnected():
-        app.liquidate_all_positions()
+    # if app.isConnected():
+    #     app.liquidate_all_positions()
 
     if app.nextOrderId is None:
         print("Could not connect to TWS or get nextValidId. Exiting.")
         return
 
     # --- Engine and State Initialization ---
-    engine = RealTimeInferenceEngine(tickers, profit_model_path, accuracy_model_path, context_depth, params)
-    engine.cold_start()
+    inference_engine = RealTimeInferenceEngine(tickers, profit_model_path, accuracy_model_path, context_depth, params)
+    inference_engine.cold_start()
     
     av = av_client()
     last_permanent_update_minute = -1
@@ -341,7 +337,7 @@ def main():
     # --- Main Real-Time Loop ---
     print("\n--- Starting High-Frequency Inference & Trading Loop ---")
     try:
-        while is_market_open():
+        while not is_market_open():
             now_utc = datetime.now(timezone.utc)
             
             # --- NEW: Call the position manager at the start of each cycle ---
@@ -351,18 +347,23 @@ def main():
             update_flag = (now_utc.second >= 55 and now_utc.minute != last_permanent_update_minute)
             if update_flag: last_permanent_update_minute = now_utc.minute
 
-            new_data = process_REALTIME_BULK_QUOTES(av, tickers, False)
-            if not new_data:
-                time.sleep(0.5)
+            trading_data = process_REALTIME_BULK_QUOTES(
+                av, tickers, extended_hours=True
+            )
+
+
+            if not (trading_data) :
+                print("No data fetched, skipping cycle.")
+                time.sleep(1)
                 continue
-            
-            # --- Inference ---
-            inference_item = engine.update_hot_tensor_and_return_inference_item(new_data, update=update_flag)
-            profit_logits, accuracy_logits = engine.infer(inference_item)
+
+            # --- Perform Inference ---
+            inference_item = inference_engine.update_hot_tensor_and_return_inference_item(trading_data, update=update_flag)
+            profit_logits, accuracy_logits = inference_engine.infer(inference_item)
 
             # --- Trading Logic ---
             print(f"\n--- Cycle at {now_utc.strftime('%H:%M:%S')} UTC ---")
-            for i, ticker in enumerate(engine.tickers):
+            for i, ticker in enumerate(inference_engine.tickers):
                 if now_utc < trade_cooldown_expiry[ticker]: continue
                 
                 profit_signal = profit_logits[i].item()
@@ -372,7 +373,7 @@ def main():
                 
                 if profit_signal > 0 and accuracy_signal > 0:
                     print(f"  >>> ✅ Agreement found! Attempting trade for {ticker}")
-                    entry_price = round(new_data[ticker]["close"], 2)
+                    entry_price = round(trading_data[ticker]["close"], 2)
                     
                     parent_order_id = app.place_bracket_order(
                         ticker=ticker, take_profit_float=take_profit, stop_loss_float=stop_loss,
