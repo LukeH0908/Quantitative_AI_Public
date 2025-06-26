@@ -114,69 +114,104 @@ I take no responsibility for the profitability, negligence, or any losses/gains 
 
 
 
-**Current stats for Profit model:**
+**Current stats**
 
 
+ Model Performance Report
 
+## Let's Check Out the Profit Model!
 
-Company: AMD
-  Net Profitability on this roll: 1,390.4526
-  Trades Taken (Predicted Buy): 14303
-    True Positives (TP): 9012 trades
-      Yields (Mean/Median/Std): 0.2915 / 0.2400 / 0.2296
-    False Positives (FP): 5291 trades
-      Yields (Mean/Median/Std): -0.2337 / -0.1650 / 0.2310
+### For AMD:
 
-Company: NVDA
-  Net Profitability on this roll: 1,336.7661
-  Trades Taken (Predicted Buy): 14071
-    True Positives (TP): 9042 trades
-      Yields (Mean/Median/Std): 0.3320 / 0.2702 / 0.2617
-    False Positives (FP): 5029 trades
-      Yields (Mean/Median/Std): -0.3311 / -0.2044 / 0.3554
+* **Hey, our profit on this run was:** $1,390.45! That's awesome.
 
-Total Net Profitability Score for this roll: 2,727.2188
+* **We took:** 14,303 trades where we thought it was a good time to buy.
 
---- Aggregate Validation Metrics for this Roll ---
-Total True Positives: 18054
-  TP Yields (Mean/Median/Std): 0.3118 / 0.2591 / 0.2470
-Total False Positives: 10320
-  FP Yields (Mean/Median/Std): -0.2811 / -0.1800 / 0.3021
+  * **Good calls (True Positives):** 9,012 trades!
 
+    * Average, median, and spread of our gains: 0.2915 / 0.2400 / 0.2296
 
+  * **Not-so-good calls (False Positives):** 5,291 trades.
 
+    * Average, median, and spread of our losses: -0.2337 / -0.1650 / 0.2310
 
-Current stats for Accuracy Model
+### For NVDA:
 
+* **Guess what? Our profit here was also solid:** $1,336.77!
 
-AMD Metrics:
-    Accuracy: 0.6234 (18910/30334 correct)
-    Confusion Matrix:
-      True Positives (TP): 7563
-      True Negatives (TN): 11347
-      False Positives (FP): 3800
-      False Negatives (FN): 7624
-    Precision: 0.6656
-    Recall: 0.4980
-    F1-Score: 0.5697
+* **We jumped into:** 14,071 trades where we predicted a buy.
 
-  NVDA Metrics:
-    Accuracy: 0.6439 (19531/30334 correct)
-    Confusion Matrix:
-      True Positives (TP): 10171
-      True Negatives (TN): 9360
-      False Positives (FP): 5375
-      False Negatives (FN): 5428
-    Precision: 0.6543
-    Recall: 0.6520
-    F1-Score: 0.6531
+  * **Nailed it (True Positives):** 9,042 trades!
 
-Total Overall Accuracy for this roll: 0.6336
-No improvement. Current best accuracy: 0.6621
-Total Overall Accuracy for this roll: 0.6336
-No improvement. Current best accuracy: 0.6621
+    * Average, median, and spread of our gains: 0.3320 / 0.2702 / 0.2617
 
+  * **Oops (False Positives):** 5,029 trades.
 
+    * Average, median, and spread of our losses: -0.3311 / -0.2044 / 0.3554
 
+### Total Profit for this Go-Around: $2,727.22! Not too shabby!
+
+### All the Numbers for This Run:
+
+* **Total Good Calls:** 18,054!
+
+  * Average, median, and spread of those gains: 0.3118 / 0.2591 / 0.2470
+
+* **Total Oopsies:** 10,320.
+
+  * Average, median, and spread of those losses: -0.2811 / -0.1800 / 0.3021
+
+## Now for the Accuracy Model!
+
+### AMD's Scores:
+
+* **Accuracy:** 0.6234 (That's 18,910 out of 30,334 correct predictions).
+
+* **Breakdown (Confusion Matrix):**
+
+  * We were right on buys (TP): 7,563
+
+  * We were right on holds/sells (TN): 11,347
+
+  * We predicted buy, but shouldn't have (FP): 3,800
+
+  * We missed a buy opportunity (FN): 7,624
+
+* **Precision:** 0.6656
+
+* **Recall:** 0.4980
+
+* **F1-Score:** 0.5697
+
+### NVDA's Scores:
+
+* **Accuracy:** 0.6439 (That's 19,531 out of 30,334 correct predictions).
+
+* **Breakdown (Confusion Matrix):**
+
+  * We were right on buys (TP): 10,171
+
+  * We were right on holds/sells (TN): 9,360
+
+  * We predicted buy, but shouldn't have (FP): 5,375
+
+  * We missed a buy opportunity (FN): 5,428
+
+* **Precision:** 0.6543
+
+* **Recall:** 0.6520
+
+* **F1-Score:** 0.6531
+
+### Total Overall Accuracy for this roll: 0.6336
+
+* No improvement. Current best accuracy: 0.6621
+
+* Total Overall Accuracy for this roll: 0.6336
+
+* No improvement. Current best accuracy: 0.6621
 
 **Thank You!**
+
+
+
