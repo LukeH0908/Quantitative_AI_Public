@@ -1,8 +1,11 @@
 import numpy as np
 import pandas as pd
+
 from scipy.signal import hilbert
+
 import logging
 import json
+from datetime import timezone # Keep this for explicit UTC timezone
 
 
 from urllib.parse import parse_qs
@@ -29,11 +32,11 @@ def parse_param_to_inputs(param_str: str):
         val_str = v_list[0]
 
         # Skip the “function” and “ticker” keys entirely
-        if k.lower() in ("function", "ticker"):
+        if k in ("function", "ticker"):
             continue
 
         # If the parameter name contains "period", cast to int
-        if "period" in k.lower():
+        if "period" in k:
             try:
                 input_dict[k] = int(float(val_str))
             except ValueError:
@@ -56,31 +59,31 @@ def local_OPEN(df: pd.DataFrame, input_dict: dict, key: list):
     """
     Just returns the 'open' series, renamed to key[0].
     """
-    return df["open"].rename(key[0])
+    return df["OPEN"].rename(key[0])
 
 def local_HIGH(df: pd.DataFrame, input_dict: dict, key: list):
     """
     Just returns the 'high' series, renamed to key[0].
     """
-    return df["high"].rename(key[0])
+    return df["HIGH"].rename(key[0])
 
 def local_LOW(df: pd.DataFrame, input_dict: dict, key: list):
     """
     Just returns the 'low' series, renamed to key[0].
     """
-    return df["low"].rename(key[0])
+    return df["LOW"].rename(key[0])
 
 def local_CLOSE(df: pd.DataFrame, input_dict: dict, key: list):
     """
     Just returns the 'close' series, renamed to key[0].
     """
-    return df["close"].rename(key[0])
+    return df["CLOSE"].rename(key[0])
 
 def local_VOLUME(df: pd.DataFrame, input_dict: dict, key: list):
     """
     Just returns the 'volume' series, renamed to key[0].
     """
-    return df["volume"].rename(key[0])
+    return df["VOLUME"].rename(key[0])
 
 
 def local_SMA(df: pd.DataFrame, input_dict: dict, key: list):
@@ -242,41 +245,50 @@ def intended_ma(encoded_int):
     else:
         raise ValueError(f"Invalid moving average code: {encoded_int}")
     
-def local_VWAP(df: pd.DataFrame, input_dict: dict, key: list):
-    """
-    Intraday VWAP: weighted avg price per session, so we must reset at each trading day.
+def local_VWAP(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Series:
 
-    For each row:
-      VWAP_t = ∑_{i=start_of_day..t} (TP_i × vol_i)  / ∑_{i=start_of_day..t} vol_i
-    where TP = (high + low + close) / 3.
+    
+    # Ensure columns exist and are numeric
+    required_cols = ["HIGH", "LOW", "CLOSE", "VOLUME"]
+    df_processed = df.copy() # Work on a copy to avoid modifying original df
+    df_processed.columns = df_processed.columns.str.upper() # Standardize column names
 
-    We group by date and apply separate cumsums per group.
-    """
-    # assume df.index are UNIX‑secs already floored to minutes
-    # first recover a datetime index
-    dt = pd.to_datetime(df.index, unit="s") \
-           .tz_localize("UTC") \
-           .tz_convert("US/Eastern")
+    for col in required_cols:
+        if col not in df_processed.columns:
+            print(f"Warning: Missing required column '{col}' for VWAP calculation. Returning all-NaN series.")
+            return pd.Series(np.nan, index=df.index, name=key[0])
+        # Ensure columns are numeric, fill NaNs as needed (already done in _calculate_param_slice typically)
+        df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').ffill().bfill()
+    
+    # Fill volume NaNs with 0 before calculations
+    df_processed['VOLUME'] = df_processed['VOLUME'].fillna(0)
 
-    # typical price × volume
-    tp = (df["high"] + df["low"] + df["close"]) / 3
-    tp_vol = tp * df["volume"]
+    # Calculate Typical Price (TP)
+    tp = (df_processed["HIGH"] + df_processed["LOW"] + df_processed["CLOSE"]) / 3
+    
+    # Calculate TP * Volume
+    tp_vol = tp * df_processed["VOLUME"]
 
-    # attach dates for grouping
-    df2 = df.copy()
-    df2["tp_vol"] = tp_vol
-    df2["vol"]    = df["volume"]
-    df2["date"]   = dt.date
+    # Calculate cumulative sums over the entire DataFrame
+    # This assumes no daily reset.
+    cum_tp_vol = tp_vol.cumsum()
+    cum_vol = df_processed["VOLUME"].cumsum()
 
-    # compute cumsums per day
-    df2["cum_tp_vol"] = df2.groupby("date")["tp_vol"].cumsum()
-    df2["cum_vol"]    = df2.groupby("date")["vol"].cumsum()
+    # Intraday VWAP (or rather, cumulative VWAP)
+    # Handle division by zero: if cum_vol is 0, vwap should be NaN or 0
+    vwap = cum_tp_vol / cum_vol
+    
+    # Replace any potential infinite values with NaN that could arise from 0/0 or X/0.
+    vwap = vwap.replace([np.inf, -np.inf], np.nan)
+    
+    # Fill any remaining NaNs (e.g., if first few volumes were zero)
+    # This might fill initial NaNs with 0, which is a choice.
+    vwap = vwap.ffill()
 
-    # intraday VWAP
-    df2["vwap"] = df2["cum_tp_vol"] / df2["cum_vol"]
 
-    # return only the VWAP series, named to match key[0]
-    return df2["vwap"].rename(key[0])
+    # Return the VWAP series, named to match key[0] and with the original df's index
+    return vwap.rename(key[0])
+
 def local_MACD_MACD(df: pd.DataFrame, input_dict: dict, key: list):
     series     = df[input_dict["series_type"]]
     fastperiod = input_dict["fastperiod"]
@@ -342,9 +354,9 @@ def local_WILLR(df: pd.DataFrame, input_dict: dict, key: list):
     where N = time_period.
     """
     period = input_dict["time_period"]
-    high   = df["high"]
-    low    = df["low"]
-    close  = df["close"]
+    high   = df["HIGH"]
+    low    = df["LOW"]
+    close  = df["CLOSE"]
 
     hh = high.rolling(window=period, min_periods=period).max()
     ll = low.rolling( window=period, min_periods=period).min()
@@ -365,9 +377,9 @@ def local_ADX(df: pd.DataFrame, input_dict: dict, key: list):
       7) ADX = Wilder’s smooth of DX over N periods
     """
     period = input_dict["time_period"]
-    high   = df["high"]
-    low    = df["low"]
-    close  = df["close"]
+    high   = df["HIGH"]
+    low    = df["LOW"]
+    close  = df["CLOSE"]
 
     prev_high  = high.shift(1)
     prev_low   = low.shift(1)
@@ -470,7 +482,7 @@ def _compute_slow_stoch(df: pd.DataFrame, input_dict: dict):
     """
     Returns a DataFrame with columns ['pctK', 'SlowK'] for the slow stochastic.
     """
-    high, low, close = df["high"], df["low"], df["close"]
+    high, low, close = df["HIGH"], df["LOW"], df["CLOSE"]
     K = input_dict["fastkperiod"]
     hh = high.rolling(K).max()
     ll = low.rolling(K).min()
@@ -514,15 +526,7 @@ def local_STOCH_SLOWD(df: pd.DataFrame, input_dict: dict, key: list):
     return pd.DataFrame({key[0]: slowD}, index=df.index)
 
 
-def _session_groups(df):
-    # convert to EST and extract session date
-    dates = (
-      pd.to_datetime(df.index, unit="s")
-        .tz_localize("UTC")
-        .tz_convert("US/Eastern")
-        .date
-    )
-    return dates
+
 
 def wilder_rsi(series: pd.Series, period: int) -> pd.Series:
     """
@@ -556,65 +560,59 @@ def local_RSI(df: pd.DataFrame, input_dict: dict, key: list):
     rsi    = wilder_rsi(series, period)
     return rsi.rename(key[0])
 
-def _compute_stochrsi_pctK_and_grp(df, input_dict):
-    """
-    Returns a tuple (pctK: Series, grp: Series) for your StochRSI.
-    """
-    # 1) Wilder RSI
-    rsi = local_RSI(df, input_dict, ["RSI"])  # already a Series
 
-    # 2) raw %K per session
-    FK  = input_dict["fastkperiod"]
-    grp = _session_groups(df)
-    lo  = rsi.groupby(grp).rolling(FK, min_periods=FK).min().reset_index(level=0, drop=True)
-    hi  = rsi.groupby(grp).rolling(FK, min_periods=FK).max().reset_index(level=0, drop=True)
-    pctK = 100 * (rsi - lo) / (hi - lo)
+def _compute_stochrsi_pctK_and_grp(df: pd.DataFrame, input_dict: dict):
+    # Ensure local_RSI is correctly implemented and returns a Series with df.index
+    rsi = local_RSI(df, input_dict, ["RSI"]) 
 
-    return pctK, grp
+    FK = input_dict["fastkperiod"]
 
+
+    # No groupby needed. Rolling min/max will be applied to the entire RSI series.
+    lo = rsi.rolling(FK, min_periods=FK).min()
+    hi = rsi.rolling(FK, min_periods=FK).max()
+    # --- CHANGE END ---
+
+    denominator = (hi - lo)
+    
+    # Calculate pctK
+    pctK_raw = 100 * (rsi - lo) / denominator
+    
+    # Replace infinite values (from division by zero) with NaN
+    pctK = pctK_raw.replace([np.inf, -np.inf], np.nan)
+
+    # Fill NaNs. Be aware that this fills *all* NaNs, including those from insufficient data.
+    pctK = pctK.fillna(0.0) 
+    return pctK, None
 
 def local_STOCHRSI_FASTK(df, input_dict, key):
     pctK, grp = _compute_stochrsi_pctK_and_grp(df, input_dict)
     return pd.DataFrame({ key[0]: pctK }, index=df.index)
 
 
-def local_STOCHRSI_FASTD(df, input_dict, key):
+def local_STOCHRSI_FASTD(df: pd.DataFrame, input_dict: dict, key: list): # Add type hints for clarity
     pctK, grp = _compute_stochrsi_pctK_and_grp(df, input_dict)
 
     # 3) FastD smoothing
-    FD        = input_dict.get("fastdperiod", 3)
-    ma_fastd  = intended_ma(int(input_dict.get("fastdmatype", 0)))
-    fastD = (
-        pctK
-        .groupby(grp)
-        .apply(lambda x: ma_fastd(x.to_frame("pctK"), {"series_type": "pctK", "time_period": FD}, ["FastD"]))
-        .reset_index(level=0, drop=True)
-    )
+    FD = input_dict.get("fastdperiod", 3)
+    ma_fastd = intended_ma(int(input_dict.get("fastdmatype", 0)))
+    
+    # --- CHANGE START: REMOVE GROUPBY IN FASTD SMOOTHING ---
+    # Apply MA directly to pctK Series, as there are no longer groups
+    fastD = ma_fastd(pctK.to_frame("pctK"), {"series_type": "pctK", "time_period": FD}, ["FastD"])
+    # --- CHANGE END ---
+
     if isinstance(fastD, pd.DataFrame):
-        fastD = fastD.iloc[:, 0]
+        fastD = fastD.iloc[:, 0] # Extract Series if ma_fastd returns DataFrame
 
     return pd.DataFrame({ key[0]: fastD }, index=df.index)
 
 
 
 def local_APO(df: pd.DataFrame, input_dict: dict, key: list) -> pd.DataFrame:
-    """
-    Absolute Price Oscillator (APO):
-      1) Compute two MAs (fast and slow) on the chosen series
-      2) APO = fastMA - slowMA
 
-    Expects input_dict to contain:
-      - "series_type": the column name (case‐insensitive)
-      - "fastperiod": integer period for the fast MA
-      - "slowperiod": integer period for the slow MA
-      - "matype": integer code for which MA function to use (intended_ma)
-
-    Returns a one‐column DataFrame with the APO series named key[0].
-    """
-
-    # 1) Normalize series_type to lowercase & find matching column
-    col_lc = input_dict.get("series_type", "").lower()
-    matches = [c for c in df.columns if c.lower() == col_lc]
+    col_lc = input_dict.get("series_type", "")
+    matches = [c for c in df.columns if c == col_lc]
     if not matches:
         # Missing source column → return all‐NaN
         return pd.DataFrame({key[0]: [np.nan] * len(df)}, index=df.index)
@@ -693,9 +691,9 @@ def local_PPO(df: pd.DataFrame, input_dict: dict, key: list) -> pd.DataFrame:
     Returns a one‐column DataFrame with the PPO series named key[0].
     """
 
-    # 1) Normalize series_type to lowercase & find matching column
-    col_lc = input_dict.get("series_type", "").lower()
-    matches = [c for c in df.columns if c.lower() == col_lc]
+
+    col_lc = input_dict.get("series_type", "")
+    matches = [c for c in df.columns if c == col_lc]
     if not matches:
         return pd.DataFrame({key[0]: [np.nan] * len(df)}, index=df.index)
     real_col = matches[0]
@@ -772,10 +770,10 @@ def local_BOP(df: pd.DataFrame, input_dict: dict, key: list):
     Balance of Power (BOP):
       BOP_t = (Close_t − Open_t) / (High_t − Low_t)
     """
-    op    = df["open"]
-    hi    = df["high"]
-    lo    = df["low"]
-    cl    = df["close"]
+    op    = df["OPEN"]
+    hi    = df["HIGH"]
+    lo    = df["LOW"]
+    cl    = df["CLOSE"]
     bop   = (cl - op) / (hi - lo)
     return bop.rename(key[0])
 
@@ -789,7 +787,7 @@ def local_CCI(df: pd.DataFrame, input_dict: dict, key: list):
       CCI = (TP − M) / (0.015 × MD)
     """
     N   = int(input_dict["time_period"])
-    tp  = (df["high"] + df["low"] + df["close"]) / 3
+    tp  = (df["HIGH"] + df["LOW"] + df["CLOSE"]) / 3
 
     # rolling mean of TP
     ma_tp = tp.rolling(window=N, min_periods=N).mean()
@@ -829,7 +827,7 @@ def local_MFI(df: pd.DataFrame, input_dict: dict, key: list):
       MFI = 100 × PositiveMF / (PositiveMF + NegativeMF)  over period N
     """
     N   = input_dict["time_period"]
-    high, low, close, vol = df["high"], df["low"], df["close"], df["volume"]
+    high, low, close, vol = df["HIGH"], df["LOW"], df["CLOSE"], df["VOLUME"]
 
     tp = (high + low + close) / 3
     mf = tp * vol
@@ -859,9 +857,9 @@ def local_TRIX(df: pd.DataFrame, input_dict: dict, key: list):
 
 
 # def _directional_movements(df: pd.DataFrame):
-#     high       = df["high"]
-#     low        = df["low"]
-#     close      = df["close"]
+#     high       = df["HIGH"]
+#     low        = df["LOW"]
+#     close      = df["CLOSE"]
 #     prev_high  = high.shift(1)
 #     prev_low   = low.shift(1)
 #     prev_close = close.shift(1)
@@ -884,9 +882,9 @@ def _directional_movements(df: pd.DataFrame):
     Helper: computes raw +DM, -DM, and True Range as in the
     classical Directional Movement system.
     """
-    high       = df["high"]
-    low        = df["low"]
-    close      = df["close"]
+    high       = df["HIGH"]
+    low        = df["LOW"]
+    close      = df["CLOSE"]
     prev_high  = high.shift(1)
     prev_low   = low.shift(1)
     prev_close = close.shift(1)
@@ -948,7 +946,7 @@ def local_DX(df: pd.DataFrame, input_dict: dict, key: list):
     period = int(input_dict["time_period"])
     alpha  = 1.0 / period
 
-    hi, lo, cl = df["high"], df["low"], df["close"]
+    hi, lo, cl = df["HIGH"], df["LOW"], df["CLOSE"]
     prev_hi    = hi.shift(1)
     prev_lo    = lo.shift(1)
     prev_cl    = cl.shift(1)
@@ -984,8 +982,8 @@ def local_MIDPOINT(df: pd.DataFrame, input_dict: dict, key: list):
     Midpoint indicator: (HighestHigh_N + LowestLow_N) / 2
     """
     period = input_dict["time_period"]
-    hi = df['high'].rolling(window=period, min_periods=period).max()
-    lo = df['low'].rolling(window=period, min_periods=period).min()
+    hi = df['HIGH'].rolling(window=period, min_periods=period).max()
+    lo = df['LOW'].rolling(window=period, min_periods=period).min()
     midpoint = (hi + lo) / 2
     return midpoint.rename(key[0])
 
@@ -995,8 +993,8 @@ def local_MIDPRICE(df: pd.DataFrame, input_dict: dict, key: list):
     """
     Rolling Mid-Price: (Highest High + Lowest Low) / 2 over `time_period` bars.
     """
-    hi = df["high"]
-    lo = df["low"]
+    hi = df["HIGH"]
+    lo = df["LOW"]
     N  = input_dict["time_period"]
 
     highest = hi.rolling(window=N, min_periods=N).max()
@@ -1010,7 +1008,7 @@ def local_TRANGE(df: pd.DataFrame, input_dict: dict, key: list):
     """
     True Range: max(high−low, |high−prev_close|, |low−prev_close|)
     """
-    high, low, close = df["high"], df["low"], df["close"]
+    high, low, close = df["HIGH"], df["LOW"], df["CLOSE"]
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
@@ -1034,7 +1032,7 @@ def local_NATR(df: pd.DataFrame, input_dict: dict, key: list):
     Normalized ATR: ATR / Close * 100
     """
     atr   = local_ATR(df, input_dict, ["ATR"])
-    natr  = atr / df["close"] * 100
+    natr  = atr / df["CLOSE"] * 100
     return natr.rename(key[0])
 
 
@@ -1044,71 +1042,112 @@ def local_SAR(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Series:
     Expects input_dict to contain:
       - "acceleration": initial acceleration factor (e.g. 0.02)
       - "maximum": maximum acceleration factor (e.g. 0.2)
-    df must have columns "high", "low", and "close" (case‐insensitive).
+    df must have columns "HIGH", "LOW", and "CLOSE" (case‐insensitive).
     Returns a pandas Series of SAR values, indexed like df, named key[0].
     """
-    # 1) Normalize column names to lowercase
-    col_high = "high"
-    col_low = "low"
-    col_close = "close"
-    for col in (col_high, col_low, col_close):
-        if col not in df.columns.str.lower():
-            # Missing required column → return all‐NaN series
-            return pd.Series([np.nan] * len(df), index=df.index, name=key[0])
+    
+    # 1) Robustly check for and prepare columns
+    # Ensure column names are consistent (e.g., all uppercase as expected by the logic)
+    df_upper_cols = df.copy()
+    df_upper_cols.columns = df_upper_cols.columns.str.upper()
 
-    # 2) Extract and forward/back‐fill to handle intermittent NaNs
-    high = df[col_high].astype(float).ffill().bfill().to_numpy()
-    low = df[col_low].astype(float).ffill().bfill().to_numpy()
-    closes = df[col_close].astype(float).ffill().bfill().to_numpy()
+    col_high = "HIGH"
+    col_low = "LOW"
+    col_close = "CLOSE"
+    
+    required_cols = [col_high, col_low, col_close]
+    if not all(col in df_upper_cols.columns for col in required_cols):
+        print(f"Warning: Missing required columns for SAR in DataFrame: {', '.join([col for col in required_cols if col not in df_upper_cols.columns])}. Returning all-NaN series.")
+        return pd.Series(np.nan, index=df.index, name=key[0])
+
+    # Extract and forward/back-fill to handle intermittent NaNs
+    # IMPORTANT: .to_numpy() on a Series with NaNs converts them to np.nan, which is float.
+    # If the entire series is NaN after ffill/bfill, it will remain NaN.
+    high = df_upper_cols[col_high].astype(float).ffill().bfill().to_numpy()
+    low = df_upper_cols[col_low].astype(float).ffill().bfill().to_numpy()
+    closes = df_upper_cols[col_close].astype(float).ffill().bfill().to_numpy()
     n = len(df)
-    if n < 2:
-        # Not enough data to compute → all‐NaN
-        return pd.Series([np.nan] * n, index=df.index, name=key[0])
+    
+    # Check for empty DataFrame or all-NaN core data *after* filling
+    if n < 2 or np.all(np.isnan(high)) or np.all(np.isnan(low)) or np.all(np.isnan(closes)):
+        print(f"Warning: Not enough valid data (n={n}) or all NaNs after fill for SAR computation. Returning all-NaN series.")
+        return pd.Series(np.nan, index=df.index, name=key[0])
 
     # 3) Read acceleration parameters
     try:
         acc = float(input_dict.get("acceleration", 0.02))
         max_af = float(input_dict.get("maximum", 0.2))
-    except Exception:
+    except (ValueError, TypeError): # Catch conversion errors
+        print("Warning: Invalid acceleration/maximum parameters for SAR. Using defaults (0.02, 0.2).")
         acc = 0.02
         max_af = 0.2
 
-    # 4) Pre‐allocate SAR array
+    # 4) Pre-allocate SAR array
     sar = np.full(n, np.nan, dtype=float)
 
-    # 5) Determine initial trend based on first two closes
-    trend_up = closes[1] >= closes[0]
+    # --- ROBUST INITIALIZATION START ---
+    # Find the first index `i` where closes[i] and closes[i+1] are NOT NaN
+    first_valid_idx = -1
+    for k in range(n - 1):
+        if not np.isnan(closes[k]) and not np.isnan(closes[k+1]):
+            first_valid_idx = k
+            break
+    
+    if first_valid_idx == -1:
+        print("Warning: Not enough consecutive valid close prices to determine initial SAR trend. Returning all-NaN series.")
+        return pd.Series(np.nan, index=df.index, name=key[0])
+
+    # Use the first_valid_idx for initialization
+    # 5) Determine initial trend based on first two *valid* closes
+    trend_up = closes[first_valid_idx + 1] >= closes[first_valid_idx]
 
     # 6) Initialize EP (Extreme Point) and AF (acceleration factor)
     af = acc
     if trend_up:
-        ep = high[0]
-        sar[0] = low[0]
+        ep = high[first_valid_idx]
+        sar[first_valid_idx] = low[first_valid_idx]
     else:
-        ep = low[0]
-        sar[0] = high[0]
+        ep = low[first_valid_idx]
+        sar[first_valid_idx] = high[first_valid_idx]
+    
+    if first_valid_idx + 1 < n:
+        sar[first_valid_idx + 1] = sar[first_valid_idx]
+    
+    for i in range(first_valid_idx + 2, n): 
+        # Check for NaNs in current bar's data (high[i], low[i], closes[i])
+        if np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(closes[i]):
+            pass # Keep sar[i] as NaN and continue.
 
-    # 7) Second period SAR = same as first
-    sar[1] = sar[0]
-
-    # 8) Iterate from i=1 to n−1
-    for i in range(1, n):
         prev_sar = sar[i - 1]
-        prev_ep = ep
-        prev_af = af
+        prev_ep = ep # ep is updated in the loop based on previous bar
+        prev_af = af # af is updated in the loop based on previous bar
+
+        # If previous SAR is NaN, current SAR will also be NaN.
+        # This is expected and desirable; NaN propagates.
+        if np.isnan(prev_sar) or np.isnan(prev_ep) or np.isnan(prev_af):
+             sar[i] = np.nan
+             continue # Skip calculations if inputs are NaN
 
         # 8a) Compute the preliminary SAR
         curr_sar = prev_sar + prev_af * (prev_ep - prev_sar)
 
         # 8b) Boundary rule: cannot lie inside last two bars’ highs/lows
-        if trend_up and i >= 2:
-            curr_sar = min(curr_sar, low[i - 1], low[i - 2])
-        elif not trend_up and i >= 2:
-            curr_sar = max(curr_sar, high[i - 1], high[i - 2])
+        # Ensure i-1 and i-2 are within bounds and their data is not NaN
+        if trend_up:
+            if i - 1 >= 0 and not np.isnan(low[i-1]): # Check previous low for NaN
+                curr_sar = min(curr_sar, low[i - 1])
+            if i - 2 >= 0 and not np.isnan(low[i-2]): # Check previous-previous low for NaN
+                curr_sar = min(curr_sar, low[i - 2])
+        else: # Downtrend
+            if i - 1 >= 0 and not np.isnan(high[i-1]): # Check previous high for NaN
+                curr_sar = max(curr_sar, high[i - 1])
+            if i - 2 >= 0 and not np.isnan(high[i-2]): # Check previous-previous high for NaN
+                curr_sar = max(curr_sar, high[i - 2])
+
 
         # 8c) Check for reversal
         if trend_up:
-            if low[i] < curr_sar:
+            if not np.isnan(low[i]) and low[i] < curr_sar: # Check current low for NaN
                 # Reverse to downtrend
                 trend_up = False
                 sar[i] = prev_ep  # SAR jumps to prior EP
@@ -1117,14 +1156,12 @@ def local_SAR(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Series:
             else:
                 # Continue uptrend
                 sar[i] = curr_sar
-                if high[i] > prev_ep:
+                if not np.isnan(high[i]) and high[i] > prev_ep: # Check current high for NaN
                     ep = high[i]
                     af = min(prev_af + acc, max_af)
-                else:
-                    ep = prev_ep
-                    af = prev_af
-        else:
-            if high[i] > curr_sar:
+                # else: ep and af remain prev_ep, prev_af - this is implicit
+        else: # downtrend
+            if not np.isnan(high[i]) and high[i] > curr_sar: # Check current high for NaN
                 # Reverse to uptrend
                 trend_up = True
                 sar[i] = prev_ep  # SAR jumps to prior EP
@@ -1133,49 +1170,69 @@ def local_SAR(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Series:
             else:
                 # Continue downtrend
                 sar[i] = curr_sar
-                if low[i] < prev_ep:
+                if not np.isnan(low[i]) and low[i] < prev_ep: # Check current low for NaN
                     ep = low[i]
                     af = min(prev_af + acc, max_af)
-                else:
-                    ep = prev_ep
-                    af = prev_af
+                # else: ep and af remain prev_ep, prev_af - this is implicit
 
     return pd.Series(sar, index=df.index, name=key[0])
 
 
-
-
-
-
 def _compute_fastk(df: pd.DataFrame, input_dict: dict):
     """
-    Returns raw %K Series and session-grouping Index for Slow Stoch.
+    Returns raw %K Series for Slow Stoch, based on continuous data.
     """
-    h, l, c = df["high"], df["low"], df["close"]
-    FK = input_dict["fastkperiod"]
-    grp = _session_groups(df)
+    # Ensure columns are uppercase and numeric
+    df_processed = df.copy()
+    df_processed.columns = df_processed.columns.str.upper()
 
+    required_cols = ["HIGH", "LOW", "CLOSE"]
+    for col in required_cols:
+        if col not in df_processed.columns:
+            print(f"Warning: Missing required column '{col}' for StochF calculation. Returning all-NaN series.")
+            return pd.Series(np.nan, index=df.index), None # Return None for grp
+        df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').ffill().bfill()
+        
+    h = df_processed["HIGH"]
+    l = df_processed["LOW"]
+    c = df_processed["CLOSE"]
+    
+    FK = input_dict["fastkperiod"]
+    
+    # --- CHANGE START: REMOVE GROUPING ---
+    # No grouping is applied. Rolling min/max will be over the entire series.
     hh = (
-        h.groupby(grp)
-         .rolling(FK, min_periods=FK)
+        h.rolling(FK, min_periods=FK)
          .max()
-         .reset_index(level=0, drop=True)
     )
     ll = (
-        l.groupby(grp)
-         .rolling(FK, min_periods=FK)
+        l.rolling(FK, min_periods=FK)
          .min()
-         .reset_index(level=0, drop=True)
     )
-    raw_fastk = 100 * (c - ll) / (hh - ll)
+    # --- CHANGE END ---
+
+    # Handle division by zero or NaN values
+    denominator = (hh - ll)
+    raw_fastk_raw = 100 * (c - ll) / denominator
+    
+    # Replace infinite values (from division by zero) with NaN
+    raw_fastk = raw_fastk_raw.replace([np.inf, -np.inf], np.nan)
+    
+    # Fill remaining NaNs. Common for oscillators like Stoch to fill with 0 or a last valid value.
+    # Be aware that this fills *all* NaNs, including those from insufficient data.
+    raw_fastk = raw_fastk.fillna(0.0)
+
+    # grp is no longer meaningful in this context
+    grp = None 
+
     return raw_fastk, grp
 
 
 def local_STOCHF_FASTK(df: pd.DataFrame, input_dict: dict, key: list):
     """
-    Returns raw %K and first smoothing (%D) in one go.
+    Returns raw %K for Fast Stochastic.
     """
-    raw_fastk, grp = _compute_fastk(df, input_dict)
+    raw_fastk, grp = _compute_fastk(df, input_dict) # grp will be None here
     return pd.DataFrame({ key[0]: raw_fastk }, index=df.index)
 
 
@@ -1183,19 +1240,22 @@ def local_STOCHF_FASTD(df: pd.DataFrame, input_dict: dict, key: list):
     """
     Takes raw %K from the same helper, then applies the second smoothing.
     """
-    raw_fastk, grp = _compute_fastk(df, input_dict)
+    raw_fastk, grp = _compute_fastk(df, input_dict) # grp will be None here
     FD = input_dict["fastdperiod"]
     ma_fastd = intended_ma(int(input_dict.get("fastdmatype", 0)))
 
-    fastd = (
-        raw_fastk
-        .groupby(grp)
-        .apply(lambda x: ma_fastd(x.to_frame("fastk"), {"series_type": "fastk", "time_period": FD}, ["fastd"]))
-        .reset_index(level=0, drop=True)
-    )
+    # --- CHANGE START: REMOVE GROUPBY IN FASTD SMOOTHING ---
+    # Apply MA directly to raw_fastk Series, as there are no longer groups
+    fastd = ma_fastd(raw_fastk.to_frame("fastk"), {"series_type": "fastk", "time_period": FD}, ["fastd"])
+    # --- CHANGE END ---
+
     # if result is a DataFrame, extract its first column
     if isinstance(fastd, pd.DataFrame):
         fastd = fastd.iloc[:, 0]
+    
+    # Fill any NaNs that might have been introduced during smoothing
+    fastd = fastd.fillna(0.0) # Common for oscillators
+
     return pd.DataFrame({ key[0]: fastd }, index=df.index)
 
 # ─── BBANDS ──────────────────────────────────────────────────────────────────
@@ -1237,9 +1297,6 @@ def local_BBANDS_RUB(df: pd.DataFrame, input_dict: dict, key: list):
 
 
 def local_BBANDS_RLB(df: pd.DataFrame, input_dict: dict, key: list):
-    """
-    Real Lower Band = middle - nbdevdn * std
-    """
     nb_dn = input_dict["nbdevdn"]
     mid, std = _bbands_base(df, input_dict)
     lower = mid - nb_dn * std
@@ -1263,8 +1320,8 @@ def _aroon_base(df: pd.DataFrame, input_dict: dict):
     Compute both Aroon Up and Aroon Down as pandas Series.
     Returns (aroon_up, aroon_down), both length‑df.index.
     """
-    high = df["high"]
-    low  = df["low"]
+    high = df["HIGH"]
+    low  = df["LOW"]
     N    = int(input_dict["time_period"])
 
     rolled_high = high.rolling(N, min_periods=N)
@@ -1331,9 +1388,9 @@ def local_ULTOSC(df: pd.DataFrame, input_dict: dict, key: list):
     n2 = input_dict["timeperiod2"]
     n3 = input_dict["timeperiod3"]
 
-    high       = df["high"]
-    low        = df["low"]
-    close      = df["close"]
+    high       = df["HIGH"]
+    low        = df["LOW"]
+    close      = df["CLOSE"]
     prev_close = close.shift(1)
 
     # 1) Buying Pressure
@@ -1379,10 +1436,10 @@ def local_AD(df: pd.DataFrame, input_dict: dict, key: list):
       2) Money Flow Volume     = Multiplier × Volume
       3) A/D Line              = cumulative sum of Money Flow Volume
     """
-    high  = df["high"]
-    low   = df["low"]
-    close = df["close"]
-    vol   = df["volume"]
+    high  = df["HIGH"]
+    low   = df["LOW"]
+    close = df["CLOSE"]
+    vol   = df["VOLUME"]
 
     # avoid division by zero
     denom = (high - low).replace(0, np.nan)
@@ -1419,8 +1476,8 @@ def local_OBV(df: pd.DataFrame, input_dict: dict, key: list):
              OBV_{t-1} − Volume_t if Close_t < Close_{t-1}
              OBV_{t-1}           if equal
     """
-    close = df["close"]
-    vol   = df["volume"]
+    close = df["CLOSE"]
+    vol   = df["VOLUME"]
 
     prev_close = close.shift(1)
     direction  = np.sign(close - prev_close).fillna(0)
@@ -1445,13 +1502,10 @@ def local_HT_TRENDLINE(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Seri
       2) Extract its real part (in‐phase)
       3) Smooth with a 10‐period MA
 
-    This version:
-      • Lowercases the requested series_type
-      • Forward‐fills and back‐fills any NaNs before Hilbert
-      • Returns all‐NaN if there’s no real data left
+
     """
-    # 1) Normalize series_type → lowercase
-    col = input_dict["series_type"].lower()
+ 
+    col = input_dict["series_type"]
     if col not in df.columns:
         # Column doesn’t exist at all → return all‐NaN series
         return pd.Series([np.nan] * len(df), index=df.index, name=key[0])
@@ -1486,7 +1540,7 @@ def local_HT_SINE_SINE(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Seri
     """
     Hilbert Transform Sine (no lead), computed from instantaneous phase.
     """
-    col = input_dict["series_type"].lower()
+    col = input_dict["series_type"]
     if col not in df.columns:
         return pd.Series([np.nan] * len(df), index=df.index, name=key[0])
 
@@ -1505,7 +1559,7 @@ def local_HT_SINE_LEAD_SINE(df: pd.DataFrame, input_dict: dict, key: list) -> pd
     """
     Hilbert Transform Lead Sine (shifted π/4), computed from instantaneous phase.
     """
-    col = input_dict["series_type"].lower()
+    col = input_dict["series_type"]
     if col not in df.columns:
         return pd.Series([np.nan] * len(df), index=df.index, name=key[0])
 
@@ -1527,7 +1581,7 @@ def local_HT_DCPERIOD(df: pd.DataFrame, input_dict: dict, key: list) -> pd.DataF
         2) Compute instantaneous phase and its delta
         3) period = 2π / Δphase
     """
-    col = input_dict["series_type"].lower()
+    col = input_dict["series_type"]
     if col not in df.columns:
         return pd.DataFrame({key[0]: [np.nan] * len(df)}, index=df.index)
 
@@ -1547,7 +1601,7 @@ def local_HT_PHASOR_PHASE(df: pd.DataFrame, input_dict: dict, key: list) -> pd.D
     """
     In-Phase component of the Hilbert Transform (real part).
     """
-    col = input_dict["series_type"].lower()
+    col = input_dict["series_type"]
     if col not in df.columns:
         return pd.DataFrame({key[0]: [np.nan] * len(df)}, index=df.index)
 
@@ -1565,7 +1619,7 @@ def local_HT_PHASOR_QUADRATURE(df: pd.DataFrame, input_dict: dict, key: list) ->
     """
     Quadrature component of the Hilbert Transform (imaginary part).
     """
-    col = input_dict["series_type"].lower()
+    col = input_dict["series_type"]
     if col not in df.columns:
         return pd.DataFrame({key[0]: [np.nan] * len(df)}, index=df.index)
 
@@ -1583,7 +1637,7 @@ def local_HT_TRENDMODE(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Seri
     """
     TrendMode: 1 if |in_phase| > |quad|, else 0.
     """
-    col = input_dict["series_type"].lower()
+    col = input_dict["series_type"]
     if col not in df.columns:
         return pd.Series([np.nan] * len(df), index=df.index, name=key[0])
 
@@ -1603,7 +1657,7 @@ def local_HT_DCPHASE(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Series
     """
     Dominant Cycle Phase (unwrapped phase).
     """
-    col = input_dict["series_type"].lower()
+    col = input_dict["series_type"]
     if col not in df.columns:
         return pd.Series([np.nan] * len(df), index=df.index, name=key[0])
 
@@ -1617,20 +1671,20 @@ def local_HT_DCPHASE(df: pd.DataFrame, input_dict: dict, key: list) -> pd.Series
     return pd.Series(phase, index=df.index, name=key[0])
 
 def local_PREVCLOSE(df, input_dict, key):
-    series = df["close"]
+    series = df["CLOSE"]
     prev = series.ffill().shift(1)
     prev.name = key[0]
     return prev
 
 def local_CHANGE(df, input_dict, key):
-    series = df["close"]
+    series = df["CLOSE"]
     prev = series.ffill().shift(1)
     change = series - prev
     change.name = key[0]
     return change
 
 def local_PCTCHANGE(df, input_dict, key):
-    series = df["close"]
+    series = df["CLOSE"]
     prev = series.ffill().shift(1).replace(0, np.nan)
     pct = (series - prev) / prev
     pct.name = key[0]

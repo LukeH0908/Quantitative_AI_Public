@@ -1,7 +1,7 @@
-import datetime
+from datetime import datetime, timedelta, time as dt_time
 from collections import deque, defaultdict
 from typing import List, Dict, Any, Tuple, Union
-
+from datetime import timezone
 import numpy as np
 import pandas as pd
 from models import Conv2DMultiBinary
@@ -19,14 +19,21 @@ import copy
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pytz
+est_timezone = pytz.timezone('America/New_York')
+
+
+
+
+
 
 
 
 class RealTimeInferenceEngine:
-    def __init__(self, tickers,  profit_model_path, accuracy_model_path, context_depth, params, device='cuda'):
+    def __init__(self, tickers,  profit_model_path, accuracy_model_path, context_depth, params, hot_burn_in= 250,device='cuda'):
         self.tickers = tickers
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-
+        self.hot_burn_in = hot_burn_in
         # --- Load Both Models ---
         print("Loading dual models...")
         num_outputs = len(self.tickers)
@@ -45,14 +52,20 @@ class RealTimeInferenceEngine:
 
 
 
-        ochlv = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
+        self.ohlcv_funcs = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"] #
         self.context_depth = context_depth
         self.params  = sorted(params)
-        self.hot_raw_ohlcv_data_buffer = {
-            f"ticker={ticker}&function={func}": deque(maxlen=250)
-            for ticker in self.tickers
-            for func in ochlv
-        }
+        self.hot_raw_ohlcv_data_buffer = {} # Initialize an empty dictionary
+
+        # Iterate through each ticker
+        for ticker in self.tickers:
+            # Add the TIMESTAMP deque for the current ticker
+            self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=TIMESTAMP"] = deque(maxlen=hot_burn_in)
+
+            # Then iterate through each OHLCV function and add its deque
+            for func in self.ohlcv_funcs:
+                self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function={func}"] = deque(maxlen=hot_burn_in)
+
         
         self.hot_params_tensor = {
             ticker: np.zeros((self.context_depth, len(self.params)), dtype=np.float32)
@@ -69,191 +82,402 @@ class RealTimeInferenceEngine:
     def cold_start(self):
         print("--- Starting Cold Start via API ---")
         av = av_client()
-
-        # This will hold the final, processed DataFrame for each ticker.
         raw_ohlcv_data = {}
-        # you might run into some problems if the trading day occurs on the first of the month, in that case, you would just call the month before
-        burn_in_period = 600
-        current_date = datetime.datetime.now()
+        current_date = datetime.now()
         current_month_yyyy_mm = current_date.strftime("%Y-%m")
 
-        for ticker in self.tickers:
 
+        for ticker in self.tickers:
             print(f"Fetching historical data for {ticker}...")
             try:
-                # 1. FETCH DATA using the API client
-                # We fetch a full month to ensure we have enough data even after market holidays.
                 series_data = av.fetch_intraday(
                     symbol=ticker, 
-                    month=current_month_yyyy_mm, # You can make this dynamic if needed
+                    month=current_month_yyyy_mm,
                     interval="1min",
-                    outputsize="full",
-                    extended_hours=True
+                    outputsize="full", # Ensure you get enough historical data
+                    extended_hours=True,
+                    entitlement="realtime"
                 )
 
                 if not series_data:
                     print(f"⚠️ Warning: No data returned from API for {ticker}.")
                     continue
-            
-                # 2. PARSE AND CONVERT TO PANDAS DATAFRAME
+                
+                # 1. Create DataFrame directly from the fetched dictionary
                 df = pd.DataFrame.from_dict(series_data, orient='index')
+                df.index = pd.to_datetime(df.index, format='%Y-%m-%d %H:%M:%S') 
+                
+                # Localize the naive index to 'America/New_York' (EST/EDT)
+                df.index = df.index.tz_localize(est_timezone, ambiguous='infer') # 'infer' handles DST
+                
+                # 2. Rename columns
                 df = df.rename(columns={
-                    '1. open': 'open', '2. high': 'high', 
-                    '3. low': 'low', '4. close': 'close', '5. volume': 'volume'
+                    '1. open': 'OPEN', '2. high': 'HIGH', 
+                    '3. low': 'LOW', '4. close': 'CLOSE', '5. volume': 'VOLUME'
                 })
                 
-                # Convert index to datetime objects and data to numbers
+                # 3. Convert index to datetime and sort (Alpha Vantage gives newest first)
                 df.index = pd.to_datetime(df.index)
-                df = df.astype(float)
+                df = df.sort_index() # Sort to have oldest first (ascending time)
 
-                # 3. SORT DATA into ascending chronological order (oldest to newest)
-                df = df.sort_index(ascending=True)
-                df = df.resample('1min').ffill()
+                # 4. Convert OHLCV data to numeric types
+                # Use .apply(pd.to_numeric) for robustness, handling errors
+                for col in self.ohlcv_funcs:
+                    df[col] = pd.to_numeric(df[col], errors='coerce') # 'coerce' will turn non-numeric to NaN
+                
+                # Set volume to integer, handling NaNs from conversion if any
+                df['VOLUME'] = df['VOLUME'].fillna(0).astype(float) # Fill NaN volumes with 0, then convert to int
 
-                df_recent = df.tail(burn_in_period)
-                # In your cold_start function, after creating df_recent
-                if not df_recent.empty:
-                    print(f"Processed time range for {ticker}: {df_recent.index[0]} to {df_recent.index[-1]}")
-                raw_ohlcv_data[ticker] = df_recent
-                print(f"✅ Processed {len(df_recent)} data points for {ticker}.")
+                if not df.empty:
+                    latest_data_time = df.index[-1] # Most recent time in the fetched data
+                    print("latest_data_time ", latest_data_time)
+                    
+                    current_utc_minute_rounded = datetime.now(df.index.tz).replace(second=0, microsecond=0)
+                    start_time_for_range = latest_data_time - timedelta(minutes=self.hot_burn_in - 1)
+                    
+                    full_time_index = pd.date_range(
+                        start=start_time_for_range,
+                        end=latest_data_time,
+                        freq='1min',
+                        name='timestamp', # Name the index for clarity
+                        tz=df.index.tz # Ensure timezone consistency
+                    )
+                    print(f"length of linspace", len(full_time_index))
+                    
+                    reindexed_df = df.reindex(full_time_index)
+
+                    
+                    reindexed_df[['OPEN', 'HIGH', 'LOW', 'CLOSE']] = reindexed_df[['OPEN', 'HIGH', 'LOW', 'CLOSE']].ffill()
+                    
+                    # Fill VOLUME with 0 for missing entries
+                    reindexed_df['VOLUME'] = reindexed_df['VOLUME'].fillna(0).astype(float)
+                    
+
+
+
+                    # Handle any remaining NaNs (e.g., if the very first values were NaN and couldn't be ffilled)
+                    # One common approach is to backfill remaining NaNs, or drop rows if you prefer
+                    reindexed_df[['OPEN', 'HIGH', 'LOW', 'CLOSE']] = reindexed_df[['OPEN', 'HIGH', 'LOW', 'CLOSE']].bfill()
+                    reindexed_df[['OPEN', 'HIGH', 'LOW', 'CLOSE']] = reindexed_df[['OPEN', 'HIGH', 'LOW', 'CLOSE']].fillna(0).astype(float)
+       
+       
+                    self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=TIMESTAMP"] = reindexed_df.index[:self.hot_burn_in]
+
+                    self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=OPEN"] = reindexed_df['OPEN'][:self.hot_burn_in]
+                    self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=HIGH"] = reindexed_df['HIGH'][:self.hot_burn_in]
+                    self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=LOW"] = reindexed_df['LOW'][:self.hot_burn_in]
+                    self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=CLOSE"] = reindexed_df['CLOSE'][:self.hot_burn_in]
+                    self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=VOLUME"] = reindexed_df['VOLUME'][:self.hot_burn_in]
+                    # print(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=TIMESTAMP"])
+                    # print(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=OPEN"])
+                    # print(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=HIGH"])
+                    # print(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=LOW"])
+                    # print(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=CLOSE"])
+                    # print(self.hot_raw_ohlcv_data_buffer[f"ticker={ticker}&function=VOLUME"])
+                else:
+                    print(f"⚠️ Warning: DataFrame for {ticker} is empty after initial fetch. Cannot reindex.")
 
             except Exception as e:
                 print(f"❌ Failed to process data for {ticker}. Error: {e}")
+        # print(self.hot_raw_ohlcv_data_buffer.keys())
 
-
-        all_indicator_series = {}
-        params_by_ticker = defaultdict(list)
-        for p_str in self.params:
-            tkr = parse_qs(p_str).get("ticker", [None])[0]
-            if tkr:
-                params_by_ticker[tkr].append(p_str)
-
-        for ticker, param_list in params_by_ticker.items():
-            df_full = raw_ohlcv_data.get(ticker)
-            if df_full is None or df_full.empty: continue
-            
-            for p_str in param_list:
-                try:
-                    input_dict, key = parse_param_to_inputs(p_str)
-                    fn = LOCAL_FUNCS[key[0]]
-                    result_series = fn(df_full, input_dict, key)
-                    all_indicator_series[p_str] = result_series
-                except Exception as e:
-                    print(f"Warning: Failed to calculate {p_str} for {ticker}. Error: {e}")
-
-        for ticker, df in raw_ohlcv_data.items():
-            recent_data = df.tail(250) # Use the maxlen of your deque
-            
-            # Loop through each OHLCV component
-            for component in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]:
-                # Construct the unique key for the buffer
-                buffer_key = f"ticker={ticker}&function={component.upper()}"
-                
-                # Check if this buffer should exist
-                if buffer_key in self.hot_raw_ohlcv_data_buffer:
-                    # Get the column name (e.g., 'open', 'high')
-                    column_name = component.lower()
-                    if column_name in recent_data.columns:
-                        # Get the data from the DataFrame column
-                        values = recent_data[column_name].tolist()
-                        # Extend the deque with the historical values
-                        self.hot_raw_ohlcv_data_buffer[buffer_key].extend(values)
+        
+        # print("Calculating mean for each series:")
+        # for key in self.hot_raw_ohlcv_data_buffer.keys():
+        #     if re.search(r"TIMESTAMP", key):
+        #         continue
+        #     else:
+        #         data_series = self.hot_raw_ohlcv_data_buffer[key]
+        #         mean_value = statistics.mean(data_series)
+        #         print(f"  {key}: Mean = {mean_value:.4f}")
 
         print("✅ Cold start complete. Tensors and buffers are ready.")
 
 
+    # def _calculate_param_slice(self, param_str: str, local_hot_raw_ohlcv_data_buffer: Dict[str, deque]) -> pd.Series:
+    #     """
+    #     Reconstructs an OHLCV DataFrame for a ticker and calculates one indicator series.
+    #     """
+    #     # 1. Extract ticker from the param string
+    #     ticker = param_str.split("ticker=")[1].split("&")[0]
+    #     input_dict, key = parse_param_to_inputs(param_str)
+    #     # --- DIAGNOSIS PRINTING STARTS HERE ---
+    #     # print(f"\n--- Diagnosing _calculate_param_slice for {param_str} (Ticker: {ticker}) ---")
+    #     # print(f"Keys in local_hot_raw_ohlcv_data_buffer for {ticker}:")
+        
+    #     # # Print all relevant keys for the current ticker and their deque lengths
+    #     # re_pattern = f"ticker={ticker}" # This correctly forms the pattern string, e.g., "ticker=NVDA"
+    #     # all_ticker_keys = [k for k in local_hot_raw_ohlcv_data_buffer.keys() if re.search(re_pattern, k)]
+
+    #     # for k in all_ticker_keys:
+    #     #     deque_len = len(local_hot_raw_ohlcv_data_buffer[k])
+    #     #     print(f"  {k}: Length = {deque_len}, MaxLen = {local_hot_raw_ohlcv_data_buffer[k].maxlen}")
+    #     #     # Print actual data for OHLCV to see NaNs or zeros
+    #     #     if 'function=TIMESTAMP' in k or 'function=OPEN' in k or 'function=HIGH' in k or 'function=LOW' in k or 'function=CLOSE' in k or 'function=VOLUME' in k:
+    #     #         print(f"    Data (first 5, last 5): {list(local_hot_raw_ohlcv_data_buffer[k])[:5]} ... {list(local_hot_raw_ohlcv_data_buffer[k])[-5:]}")
+    #     #         if any(pd.isna(x) for x in local_hot_raw_ohlcv_data_buffer[k]):
+    #     #             print(f"    *** WARNING: {k} contains NaN values! ***")
+    #     #         if not local_hot_raw_ohlcv_data_buffer[k]:
+    #     #             print(f"    *** WARNING: {k} is empty! ***")
+
+        
+    #     # --- DIAGNOSIS PRINTING ENDS HERE ---
+
+
+    #     timestamp_key = f"ticker={ticker}&function=TIMESTAMP"
+    #     timestamps_list = list(local_hot_raw_ohlcv_data_buffer.get(timestamp_key, deque()))
+        
+    #     # Check if timestamps are available and valid
+    #     if not timestamps_list:
+    #         print(f"Warning: No TIMESTAMP data found for {ticker} in buffer. Cannot create DataFrame.")
+    #         return pd.DataFrame(dtype=np.float64) # Return an empty DataFrame
+
+
+
+
+    #     data_for_df_columns = {}
+    #     for func in self.ohlcv_funcs + ["TIMESTAMP"]: # e.g., "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"
+    #         buffer_key = f"ticker={ticker}&function={func}"
+    #         data_list = list(local_hot_raw_ohlcv_data_buffer.get(buffer_key, deque()))
+    #         data_for_df_columns[func] = data_list 
+
+
+
+    #     all_lengths = [len(timestamps_list)] + [len(lst) for lst in data_for_df_columns.values()]
+    #     if not all_lengths or min(all_lengths) == 0:
+    #         print(f"WARNING: Data for {ticker} is empty or has inconsistent lengths. Lengths: {all_lengths}")
+    #         return pd.DataFrame(dtype=np.float64)
+        
+        
+    #     min_len = min(all_lengths)
+
+    #     timestamps_list = timestamps_list[-min_len:]
+    #     for col_name in data_for_df_columns:
+    #         data_for_df_columns[col_name] = data_for_df_columns[col_name][-min_len:]
+
+        
+    #     # Convert timestamps to datetime objects immediately
+    #     df = pd.DataFrame(data_for_df_columns)
+    #     print(df.shape)
+    #     df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], utc=True)
+    #     df = df.set_index('TIMESTAMP')#.sort_index() # Set timestamp as index and sort
+    #     print(df.index)                
+        
+
+    #     fn = LOCAL_FUNCS[key[0]]
+        
+    #     # Pass the DataFrame and parsed inputs to the indicator function
+    #     result_series = fn(df, input_dict, key)
+    #     # print(result_series.mean())
+    #     return     result_series
+    #     #    
+
+
+
     def _calculate_param_slice(self, param_str: str, local_hot_raw_ohlcv_data_buffer: Dict[str, deque]) -> pd.Series:
+        """
+        Reconstructs an OHLCV DataFrame for a ticker and calculates one indicator series,
+        using an implicit 1-minute spacing.
+        """
+        # 1. Extract ticker from the param string
         ticker = param_str.split("ticker=")[1].split("&")[0]
+        input_dict, key = parse_param_to_inputs(param_str)
+
+        data_for_df_columns = {}
+        ohlcv_deque_lengths = []
+        for func in self.ohlcv_funcs:
+            buffer_key = f"ticker={ticker}&function={func}"
+            data_list = list(local_hot_raw_ohlcv_data_buffer.get(buffer_key, deque()))
+            data_for_df_columns[func] = data_list
+            ohlcv_deque_lengths.append(len(data_list))
+
+        # Determine the minimum length among all OHLCV deques
+        if not ohlcv_deque_lengths or min(ohlcv_deque_lengths) == 0:
+            print(f"WARNING: OHLCV data for {ticker} is empty or has inconsistent lengths. Lengths: {ohlcv_deque_lengths}")
+            return pd.Series(dtype=np.float64) # Return an empty Series
+
+        min_len = min(ohlcv_deque_lengths)
+
+        # Slice all OHLCV data to the minimum length, taking the most recent items
+        for col_name in self.ohlcv_funcs:
+            data_for_df_columns[col_name] = data_for_df_columns[col_name][-min_len:]
+
+        # Create DataFrame without explicitly using TIMESTAMP for index
+        # pandas will create a default integer index (0, 1, 2, ...)
+        df = pd.DataFrame(data_for_df_columns)
         
-        # Reconstruct the DataFrame from the provided buffer
-        reconstructed_data = {}
-        components = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
-        for component in components:
-            buffer_key = f"ticker={ticker}&function={component.upper()}"
-            reconstructed_data[component.lower()] = list(local_hot_raw_ohlcv_data_buffer.get(buffer_key, []))
+        # Check for NaNs immediately after DataFrame creation
+        if df.isnull().values.any():
+            # print(f"WARNING: DataFrame for {ticker} contains NaNs before indicator calculation:\n{df.isnull().sum()}")
+            df = df.ffill().bfill()
+            if df.isnull().values.any(): # If still NaNs after fillna (e.g., all NaNs)
+                 print(f"CRITICAL WARNING: DataFrame for {ticker} still contains NaNs after fillna. Filling remaining with 0.")
+                 df = df.fillna(0) # As a last resort, fill with 0
+
+        # print(f"DataFrame for {ticker} shape: {df.shape}")
+        # print(f"DataFrame for {ticker} head:\n{df.head()}")
+        # print(f"DataFrame for {ticker} tail:\n{df.tail()}")
+
+        fn = LOCAL_FUNCS[key[0]]
         
-        df = pd.DataFrame(reconstructed_data)
+        # Pass the DataFrame and parsed inputs to the indicator function
+        # The indicator function will operate on the sequential data,
+        # implicitly treating each row as a new 1-minute interval.
+        result_series = fn(df, input_dict, key)
+
+        # Ensure the result series is also handled for potential NaNs from indicator calc
+        if result_series.isnull().values.any():
+            # print(f"WARNING: Indicator '{param_str}' returned NaNs. Filling with previous non-NaN value or 0.")
+            result_series = result_series.ffill().bfill() # Fill NaNs for safety
+
+        return result_series
+    
+    def update_hot_tensor_and_return_inference_item(self, processing_tickers: List[str], new_quote_data: Dict[str, Dict], update: bool) -> np.ndarray:
+        new_timestamp = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        for ticker in processing_tickers:
+            print(new_quote_data[f"{ticker}"])
         
-        if df.empty:
-            return pd.Series(dtype=np.float64) # Return empty series if no data
-
-        # Calculate the specific indicator requested by param_str
-        try:
-            input_dict, key = parse_param_to_inputs(param_str)
-            fn = LOCAL_FUNCS[key[0]]
-            result_series = fn(df, input_dict, key)
-            return result_series
-        except Exception as e:
-            # print(f"Could not calculate {param_str}: {e}")
-            return pd.Series(dtype=np.float64)
-
-    def update_hot_tensor_and_return_inference_item(self, new_quote_data: Dict[str, Dict], update: bool) -> np.ndarray:
-        local_buffer = copy.deepcopy(self.hot_raw_ohlcv_data_buffer)
-
-        # Step 2: Update the top layer of the *local* buffer with new quotes.
-        for ticker, quote in new_quote_data.items():
-            if ticker in self.tickers:
-                for component in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]:
-                    buffer_key = f"ticker={ticker}&function={component.upper()}"
-                    if component.lower() in quote and buffer_key in local_buffer:
-                        local_buffer[buffer_key].append(quote[component.lower()])
+        temp_buffer_for_next_state = {
+            key: deque(list(dq), maxlen=self.hot_burn_in) # Create new deque with copied contents
+            for key, dq in self.hot_raw_ohlcv_data_buffer.items()
+        }
+        
+        popped_items_for_logging = []
+        for ticker_symbol, data_for_ticker in new_quote_data.items(): 
+            if ticker_symbol in self.tickers: # Ensure we only process tracked tickers
+                popped_ts = temp_buffer_for_next_state[f"ticker={ticker_symbol}&function=TIMESTAMP"].popleft()
+                
+                popped_ohlcv_data = {'timestamp': popped_ts.isoformat()}
+                for func_name in self.ohlcv_funcs:
+                    func_key = f"ticker={ticker_symbol}&function={func_name}"
+                    popped_val = temp_buffer_for_next_state[func_key].popleft()
+                    popped_ohlcv_data[func_name] = popped_val
 
 
+
+                popped_items_for_logging.append({ticker_symbol: popped_ohlcv_data})
+                print("POPPED VECTOR ", popped_ohlcv_data)
+
+                temp_buffer_for_next_state[f"ticker={ticker_symbol}&function=TIMESTAMP"].append(new_timestamp)
+
+                # print("KEYS FOR DATA_FOR_TICKER", data_for_ticker) 
+                
+                for func_name, av_key in [
+                    ('OPEN', 'open'), ('HIGH', 'high'), ('LOW', 'low'),
+                    ('CLOSE', 'close'), ('VOLUME', 'volume')
+                ]:  
+                    buffer_key = f"ticker={ticker_symbol}&function={func_name}"
+                    value_to_append = float(data_for_ticker[av_key])
+                    temp_buffer_for_next_state[buffer_key].append(value_to_append)
+                    print(f"   New last column {buffer_key} {temp_buffer_for_next_state[buffer_key][-1]} ")
+                print("\n--- New Item Pushed ---")
+                print(f"  Values: {data_for_ticker}")
+
+                print("------------------------------------------")
+   
+                    
+               
+        
+        # Print items that were "pushed out"
+        if popped_items_for_logging:
+            print("\n--- Items Pushed Out Due to Max Length ---")
+            print(f"  Values: {popped_items_for_logging}")
+            print("------------------------------------------")
+       
+        # Step 2: If 'update' flag is true, commit the temporary buffer to the main buffer.
         if update:
-            print("--- Starting Hot Update ---")
-      
-            # This correctly replaces the old buffer with the new one
-            self.hot_raw_ohlcv_data_buffer = local_buffer 
+            print("--- Starting Hot Update (committing new state) ---")
+            self.hot_raw_ohlcv_data_buffer = temp_buffer_for_next_state 
 
 
-        # Step 3: Loop through each parameter and calculate its full time-series slice.
-        # print(f"Calculating new values for {len(self.params)} parameters...")
+        
+
         all_new_indicator_values = {}
+        # Make sure self.params contains keys like "ticker=AMD&function=OPEN", "ticker=NVDA&function=RSI"
         for param_str in self.params:
-            result_series = self._calculate_param_slice(param_str, local_buffer)
+            # _calculate_param_slice must operate on the `temp_buffer_for_next_state`
+            result_series = self._calculate_param_slice(param_str, temp_buffer_for_next_state)
+            unnormalized_series = result_series[-self.context_depth:] 
 
-            unnormalized_series = result_series[-self.context_depth:]
-
-            fn_name = param_str.split("function=")[1].split("&")[0] 
+            fn_name = param_str.split("function=")[1].split("&")[0] if "function=" in param_str else param_str # Handle if param_str is just a function name
+            
             last_value = unnormalized_series.iloc[-1]
-
-            if fn_name in AGAUSSIAN:
-                normalized_series = unnormalized_series - last_value
-            elif fn_name in PERCENTILE:
-                normalized_series = (unnormalized_series - last_value) / 100.0
-            elif fn_name in CONSTANT:
-                normalized_series = unnormalized_series - last_value
-            else: # HUGE functions
-                normalized_series = (unnormalized_series - last_value) / 10000000.0
+            # print(f"LAST VALUE: {param_str[7:30]} {last_value}")
+            if last_value is None:
+                # print(f"Warning: last_value is NaN for {param_str}. Normalization might produce NaNs.")
+                normalized_series = pd.Series(np.nan, index=result_series.index[-self.context_depth:])
+            else:
+                if fn_name in AGAUSSIAN:
+                    normalized_series = unnormalized_series - last_value
+                elif fn_name in PERCENTILE:
+                    normalized_series = (unnormalized_series - last_value) / 100.0
+                elif fn_name in CONSTANT:
+                    normalized_series = unnormalized_series - last_value
+                else: # HUGE functions or default case
+                    normalized_series = (unnormalized_series - last_value) / 10000000.0
+            
             all_new_indicator_values[param_str] = normalized_series
 
         ### --- Step 4: Order Slices and Create Final NumPy Tensor --- ###
+        
         ordered_series_list = []
         for param_str in self.params:
-            series = all_new_indicator_values.get(param_str, pd.Series(dtype=np.float64))
+            # Ensure each series added has the correct length (context_depth)
+            series = all_new_indicator_values.get(param_str, pd.Series(np.nan, index=pd.to_datetime([new_timestamp] * self.context_depth))) # Default to NaNs if not found
+            if len(series) < self.context_depth:
+                # Pad with NaNs at the beginning if cold start hasn't filled all deques yet
+                padded_series = pd.Series(np.nan, index=pd.to_datetime([new_timestamp - timedelta(minutes=self.context_depth - 1 - i) for i in range(self.context_depth)]))
+                padded_series[-len(series):] = series.values # Fill from the end
+                series = padded_series
             ordered_series_list.append(series)
             
-        # Concatenate all series into a single DataFrame. `axis=1` makes them columns.
         inference_df = pd.concat(ordered_series_list, axis=1)
+        inference_df.columns = self.params 
         
-        # Set column names for clarity (optional but good practice)
-        inference_df.columns = self.params
-        
-        # Convert the final DataFrame to a NumPy array. This is our inference item.
+    
+
         inference_item = inference_df.values.astype(np.float32)
+        
+        # ### --- Step 5: Calculate and Print Statistics for each column --- ###
+        # print("\n--- Final Tensor Statistics (per feature column) ---")
+        
+        # if inference_item.size > 0 and inference_item.shape[1] > 0:
+        #     num_features = inference_item.shape[1]
+        #     for i in range(num_features):
+        #         param_name = self.params[i]
+        #         feature_column_data = inference_item[:, i]
+                
+        #         mean_val = np.nanmean(feature_column_data)
+        #         std_val = np.nanstd(feature_column_data)
+                
+        #         if not np.isnan(mean_val):
+        #             print(f"  > Feature '{param_name}': Mean={mean_val:.4f}, Std Dev={std_val:.4f}")
+        #         else:
+        #             print(f"  > Feature '{param_name}': Mean=NaN, Std Dev=NaN (all values are NaN)")
+        # else:
+        #     print("\n--- Final Tensor is empty or has no features, no statistics to display ---")
+
         return inference_item
 
     def infer(self, inference_item: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Runs inference through both models and returns their logits.
+        """
         with torch.no_grad():
+            
+            # --- THE FIX IS HERE ---
+            # 1. Convert the incoming NumPy array to a PyTorch tensor FIRST.
             x_tensor = torch.from_numpy(inference_item)
+            
+            # 2. Now you can use PyTorch methods like .unsqueeze() and .to() on the new tensor.
             x = x_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
-
+            
+            # Get logits from both models
             profit_logits = self.profit_model(x).squeeze()
             accuracy_logits = self.accuracy_model(x).squeeze()
             
             return profit_logits, accuracy_logits
         
-    
     def visualize_inference_tensor(self, inference_item: np.ndarray, file_name: str):
         """
         Generates and saves a discrete heatmap of the feature tensor.
@@ -297,8 +521,6 @@ class RealTimeInferenceEngine:
             print(f"❌ Failed to save heatmap. Error: {e}")
         
         plt.close() # Close the plot to free up memory
-    # Add this new method inside your RealTimeInferenceEngine class
-
     def visualize_ohlcv_buffers(self, file_name: str = 'ohlcv_buffers_visualization.png'):
         """
         Generates and saves line plots of the raw OHLCV data stored in the
@@ -369,6 +591,4 @@ class RealTimeInferenceEngine:
             print(f"❌ Failed to save OHLCV visualization. Error: {e}")
             
         plt.close() # Close the plot to free up memory
-
-
-
+        

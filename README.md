@@ -116,102 +116,74 @@ I take no responsibility for the profitability, negligence, or any losses/gains 
 
 ## Current stats, Explained by Gemini for those unfamiliar with Machine Learning Classes/Labels
 
+## Profitability Report
 
- Model Performance Report
+This report shows how much money we're making (or losing) from our stock predictions.
 
-## Let's Check Out the Profit Model!
+### For AMD Stock:
 
-### For AMD:
+* **Net Profit:** We gained **$738.84**.
+* **Total "Buy" Predictions:** We made **18,546** "buy" calls.
+    * **Good Buys (True Positives):** **10,469** predictions were profitable (average gain: **26.47%**).
+    * **Bad Buys (False Positives):** **8,077** predictions resulted in losses (average loss: **-25.16%**).
 
-* **Hey, our profit on this run was:** $1,390.45! That's awesome.
+### For NVDA Stock:
 
-* **We took:** 14,303 trades where we thought it was a good time to buy.
+* **Net Profit:** We gained **$930.60**.
+* **Total "Buy" Predictions:** We made **18,522** "buy" calls.
+    * **Good Buys (True Positives):** **10,543** predictions were profitable (average gain: **30.17%**).
+    * **Bad Buys (False Positives):** **7,979** predictions resulted in losses (average loss: **-28.20%**).
 
-  * **Good calls (True Positives):** 9,012 trades!
+---
+### Overall Profit and Losses:
 
-    * Average, median, and spread of our gains: 0.2915 / 0.2400 / 0.2296
+* **Total Net Profit:** We made **$1,669.44** across both stocks.
+* **Total Good Predictions:** **21,012** profitable trades (average gain: **28.33%**).
+* **Total Bad Predictions:** **16,056** losing trades (average loss: **-26.67%**).
 
-  * **Not-so-good calls (False Positives):** 5,291 trades.
+---
+## Accuracy Report
 
-    * Average, median, and spread of our losses: -0.2337 / -0.1650 / 0.2310
+This section shows how often our predictions are simply correct or incorrect.
 
-### For NVDA:
+### Test Run 9:
 
-* **Guess what? Our profit here was also solid:** $1,336.77!
+* **AMD Accuracy:** **58.58%** correct (**13,327** out of **22,750**).
+    * **Correct "Buy" (TP):** 8,876
+    * **Correct "Not Buy" (TN):** 4,451
+    * **Wrong "Buy" (FP):** 7,414
+    * **Missed "Buy" (FN):** 2,009
+    * **Precision (Right when we say "buy"):** 54.49%
+    * **Recall (Caught good opportunities):** 81.54%
+* **NVDA Accuracy:** **59.53%** correct (**13,544** out of **22,750**).
+    * **Correct "Buy" (TP):** 9,398
+    * **Correct "Not Buy" (TN):** 4,146
+    * **Wrong "Buy" (FP):** 6,592
+    * **Missed "Buy" (FN):** 2,614
+    * **Precision:** 58.77%
+    * **Recall:** 78.24%
+* **Overall Accuracy for Run 9:** **59.06%**. (No improvement over best **67.67%**).
 
-* **We jumped into:** 14,071 trades where we predicted a buy.
+---
+### Test Run 10:
 
-  * **Nailed it (True Positives):** 9,042 trades!
+* **AMD Accuracy:** **57.22%** correct (**13,018** out of **22,750**).
+    * **Correct "Buy" (TP):** 8,120
+    * **Correct "Not Buy" (TN):** 4,898
+    * **Wrong "Buy" (FP):** 6,178
+    * **Missed "Buy" (FN):** 3,554
+    * **Precision:** 56.79%
+    * **Recall:** 69.56%
+* **NVDA Accuracy:** **56.01%** correct (**12,743** out of **22,750**).
+    * **Correct "Buy" (TP):** 10,440
+    * **Correct "Not Buy" (TN):** 2,303
+    * **Wrong "Buy" (FP):** 8,682
+    * **Missed "Buy" (FN):** 1,325
+    * **Precision:** 54.60%
+    * **Recall:** 88.74%
+* **Overall Accuracy for Run 10:** **56.62%**. (No improvement over best **67.67%**).
 
-    * Average, median, and spread of our gains: 0.3320 / 0.2702 / 0.2617
+---
+## Conclusion:
 
-  * **Oops (False Positives):** 5,029 trades.
-
-    * Average, median, and spread of our losses: -0.3311 / -0.2044 / 0.3554
-
-### Total Profit for this Go-Around: $2,727.22! Not too shabby!
-
-### All the Numbers for This Run:
-
-* **Total Good Calls:** 18,054!
-
-  * Average, median, and spread of those gains: 0.3118 / 0.2591 / 0.2470
-
-* **Total Oopsies:** 10,320.
-
-  * Average, median, and spread of those losses: -0.2811 / -0.1800 / 0.3021
-
-## Now for the Accuracy Model!
-
-### AMD's Scores:
-
-* **Accuracy:** 0.6234 (That's 18,910 out of 30,334 correct predictions).
-
-* **Breakdown (Confusion Matrix):**
-
-  * We were right on buys (TP): 7,563
-
-  * We were right on holds/sells (TN): 11,347
-
-  * We predicted buy, but shouldn't have (FP): 3,800
-
-  * We missed a buy opportunity (FN): 7,624
-
-* **Precision:** 0.6656
-
-* **Recall:** 0.4980
-
-* **F1-Score:** 0.5697
-
-### NVDA's Scores:
-
-* **Accuracy:** 0.6439 (That's 19,531 out of 30,334 correct predictions).
-
-* **Breakdown (Confusion Matrix):**
-
-  * We were right on buys (TP): 10,171
-
-  * We were right on holds/sells (TN): 9,360
-
-  * We predicted buy, but shouldn't have (FP): 5,375
-
-  * We missed a buy opportunity (FN): 5,428
-
-* **Precision:** 0.6543
-
-* **Recall:** 0.6520
-
-* **F1-Score:** 0.6531
-
-### Total Overall Accuracy for this roll: 0.6336
-
-* No improvement. Current best accuracy: 0.6621
-
-* Total Overall Accuracy for this roll: 0.6336
-
-* No improvement. Current best accuracy: 0.6621
-
-**Thank You!**
-
-
-
+Both profitability and accuracy models have completed their evaluations. The best model states for both profit and accuracy have been saved.

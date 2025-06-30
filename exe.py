@@ -9,7 +9,7 @@ from ibapi.execution import Execution
 from ibapi.contract import ComboLeg
 from datetime import datetime, timedelta
 from av_client import av_client
-from cache2 import process_REALTIME_BULK_QUOTES,RealTimeInferenceEngine
+from cache import process_REALTIME_BULK_QUOTES,RealTimeInferenceEngine
 from ibapi.order import Order
 from ibapi.order_condition import TimeCondition
 import sys
@@ -42,10 +42,7 @@ class TradeApp(EWrapper, EClient):
         self.max_exposure = max_exposure_limit
         self.current_exposure = 0.0
         self.open_positions = {}
-        
-        # This will temporarily hold the child order IDs before the parent buy order is filled.
         self.pending_orders = {}
-
         self.order_placement_lock = threading.Lock()
         self.exposure_lock = threading.Lock()
         self.position_lock = threading.Lock()
@@ -57,11 +54,30 @@ class TradeApp(EWrapper, EClient):
         # When a position is closed (TP/SL is filled), remove it from our tracker
         with self.position_lock:
             for symbol, data in list(self.open_positions.items()):
+                # Check if this orderId corresponds to a TP or SL of an open position
                 if orderId == data.get('tp_id') or orderId == data.get('sl_id'):
                     if status == "Filled":
                         print(f"Position for {symbol} closed by order {orderId}. Removing from active positions.")
                         del self.open_positions[symbol]
                         break
+                # Also handle the parent buy order being filled
+                elif orderId in self.pending_orders and status == "Filled":
+                    # This means the initial BUY order (parent) was filled
+                    details = self.pending_orders.pop(orderId) # Remove from pending
+                    # Update open_positions with actual fill data if needed, or simply mark it as open
+                    # For this test, we care that it enters open_positions
+                    print(f"Parent BUY order {orderId} for {symbol} filled. Position now active.")
+                    # If execDetails is not called quickly enough or you need to ensure it's in open_positions immediately
+                    # you could add a fallback here:
+                    if symbol not in self.open_positions:
+                         self.open_positions[symbol] = {
+                            'shares': filled,
+                            'value': filled * avgFillPrice, # Approximate value
+                            'entry_time': datetime.now(timezone.utc),
+                            'tp_id': details['tp_id'],
+                            'sl_id': details['sl_id']
+                        }
+
 
     def execDetails(self, reqId: int, contract: Contract, execution: Execution):
         super().execDetails(reqId, contract, execution)
@@ -104,6 +120,9 @@ class TradeApp(EWrapper, EClient):
         super().nextValidId(orderId)
         self.nextOrderId = orderId
         print(f"Connection successful. Next valid order ID: {orderId}")
+
+
+    next_order_id_event = threading.Event()
 
     def place_bracket_order_with_maturity(self, ticker: str, take_profit_float: float, stop_loss_float: float, entry_price: float, quantity: int, maturity_minutes: int = 15):
         with self.order_placement_lock:
@@ -190,13 +209,15 @@ class TradeApp(EWrapper, EClient):
 
     def liquidate_specific_position(self, ticker: str, quantity: int, tp_id: int, sl_id: int):
         """A targeted liquidation for one position, typically due to expiry."""
-        print(f"🔥 POSITION EXPIRED! Liquidating {quantity} shares of {ticker}...")
+        print(f"\n🔥 POSITION EXPIRED! Liquidating {quantity} shares of {ticker}...")
         
         # Step 1: Cancel the outstanding child orders to prevent conflicts
         print(f"  -> Cancelling associated Take Profit (ID: {tp_id}) and Stop Loss (ID: {sl_id}) orders.")
-        self.cancelOrder(tp_id, "")
-        self.cancelOrder(sl_id, "")
-        time.sleep(0.5) # Give cancellations a moment
+        # reqGlobalCancel might be too broad; target specific order IDs
+        # Instead of self.cancelOrder(tp_id, ""), use:
+        self.cancelOrder(tp_id) 
+        self.cancelOrder(sl_id)
+        time.sleep(1) # Give cancellations a moment to be processed by TWS
 
         # Step 2: Place a market order to sell the position immediately
         contract = Contract()
@@ -204,16 +225,30 @@ class TradeApp(EWrapper, EClient):
         contract.secType = "STK"
         contract.exchange = "SMART"
         contract.currency = "USD"
-        
+        contract.primaryExchange = "NASDAQ" # or "ARCA"
+
         order = Order()
         order.action, order.orderType, order.totalQuantity = "SELL", "MKT", quantity
         order.eTradeOnly = False
         order.firmQuoteOnly = False
+        order.goodTillCanceled = False # Ensure it's not GTC
+        order.tif = "DAY" # Time in Force: Day order
 
+        # Use a new order ID for the liquidation order
+        liquidate_order_id = self.nextOrderId
+        self.placeOrder(liquidate_order_id, contract, order)
+        self.nextOrderId += 1 # Increment for next order
+        print(f"  -> MKT SELL order (ID: {liquidate_order_id}) submitted to close {ticker} position.")
 
-        self.placeOrder(self.nextOrderId, contract, order)
-        self.nextOrderId += 1
-        print(f"  -> MKT SELL order submitted to close {ticker} position.")
+        # Remove from open_positions immediately after submitting liquidation order
+        # This prevents multiple liquidations and signals the intent
+        with self.position_lock:
+            if ticker in self.open_positions:
+                # You can choose to delete here or wait for ExecDetails callback
+                # Deleting here is proactive but relies on the MKT order to fill
+                # For this test, it's fine.
+                print(f"  -> Proactively removing {ticker} from open_positions after submitting liquidation.")
+                del self.open_positions[ticker]
 
 
     def liquidate_all_positions(self):
@@ -266,31 +301,39 @@ class TradeApp(EWrapper, EClient):
         print("Monitor your TWS terminal to confirm all positions are closed.")
         time.sleep(3) # Allow time for orders to be sent before disconnecting
 
-def manage_expired_positions(app: TradeApp, forecast_depth_minutes: int):
-    """
-    Checks for any open positions that have exceeded their forecast depth
-    and liquidates them immediately.
-    """
-    now_utc = datetime.now(timezone.utc)
-    
-    # Iterate over a copy of the items to allow safe modification during the loop
-    with app.position_lock:
-        for ticker, data in list(app.open_positions.items()):
-            entry_time = data['entry_time']
-            expiry_time = entry_time + timedelta(minutes=forecast_depth_minutes)
-            
-            if now_utc > expiry_time:
-                app.liquidate_specific_position(
-                    ticker=ticker,
-                    quantity=data['shares'],
-                    tp_id=data['tp_id'],
-                    sl_id=data['sl_id']
-                )
+    def manage_expired_positions(self, forecast_depth_minutes: int):
+        """
+        Checks for any open positions that have exceeded their forecast depth
+        and liquidates them immediately.
+        """
+        now_utc = datetime.now(timezone.utc)
+        
+        # Iterate over a copy of the items to allow safe modification during the loop
+        with self.position_lock:
+            # print(f"DEBUG: Checking {len(self.open_positions)} open positions for expiry.")
+            for ticker, data in list(self.open_positions.items()): # Use list() to iterate over a copy
+                entry_time = data['entry_time']
+                expiry_time = entry_time + timedelta(minutes=forecast_depth_minutes)
+                
+                # print(f"DEBUG: Ticker: {ticker}, Entry: {entry_time.isoformat()}, Expiry: {expiry_time.isoformat()}, Now: {now_utc.isoformat()}")
+
+                if now_utc > expiry_time:
+                    print(f"❗Position for {ticker} (entered at {entry_time.isoformat()}) has expired (expiry at {expiry_time.isoformat()}).")
+                    self.liquidate_specific_position(
+                        ticker=ticker,
+                        quantity=data['shares'],
+                        tp_id=data['tp_id'],
+                        sl_id=data['sl_id']
+                    )
+                else:
+                    print(f"✅ Position for {ticker} is still active. Expires in {(expiry_time - now_utc).total_seconds():.0f} seconds.")
+
 
 
 def main():
     
     config_filepath = sys.argv[1]
+    DEBUG = sys.argv[2]
     with open(config_filepath, 'r', encoding='utf-8') as f:
         known = json.load(f)
         tickers = known["ticker"]
@@ -309,20 +352,20 @@ def main():
     params = sorted(params)
 
     # --- App and Threading Setup ---
-    # app = TradeApp(max_exposure_limit=maximum_exposure)
-    # app.connect("127.0.0.1", 7496, clientId=0)
+    app = TradeApp(max_exposure_limit=maximum_exposure)
+    app.connect("127.0.0.1", 7496, clientId=0)
     
-    # api_thread = threading.Thread(target=app.run, daemon=True)
-    # api_thread.start()
-    # print("Connecting to TWS...")
-    # time.sleep(2)
+    api_thread = threading.Thread(target=app.run, daemon=True)
+    api_thread.start()
+    print("Connecting to TWS...")
+    time.sleep(2)
 
-    # if app.isConnected():
-    #     app.liquidate_all_positions()
+    if app.isConnected():
+        app.liquidate_all_positions()
 
-    # if app.nextOrderId is None:
-    #     print("Could not connect to TWS or get nextValidId. Exiting.")
-    #     return
+    if app.nextOrderId is None:
+        print("Could not connect to TWS or get nextValidId. Exiting.")
+        return
 
     # --- Engine and State Initialization ---
     inference_engine = RealTimeInferenceEngine(tickers, profit_model_path, accuracy_model_path, context_depth, params)
@@ -337,31 +380,30 @@ def main():
     # --- Main Real-Time Loop ---
     print("\n--- Starting High-Frequency Inference & Trading Loop ---")
     try:
-        while is_market_open():
+        while (is_market_open() or (DEBUG=="TRUE")):
             now_utc = datetime.now(timezone.utc)
             
-            # # --- NEW: Call the position manager at the start of each cycle ---
-            # manage_expired_positions(app, forecast_depth)
+            app.manage_expired_positions(forecast_depth)
             
             # --- State Update and Data Fetching ---
-            # update_flag = (now_utc.second >= 55 and now_utc.minute != last_permanent_update_minute)
-            update_flag = True
+            update_flag = (now_utc.second >= 55 and now_utc.minute != last_permanent_update_minute)
             if update_flag: last_permanent_update_minute = now_utc.minute
 
             trading_data = process_REALTIME_BULK_QUOTES(
                 av, tickers, extended_hours=True
             )
 
-
+            
             if not (trading_data) :
                 print("No data fetched, skipping cycle.")
                 time.sleep(1)
                 continue
-
+            
             # --- Perform Inference ---
-            inference_item = inference_engine.update_hot_tensor_and_return_inference_item(trading_data, update=update_flag)
-            inference_engine.visualize_inference_tensor(inference_item, "ouput_inference_tensor.png")
-            inference_engine.visualize_ohlcv_buffers( "ouput_ohlcv_buffer.png")
+            inference_item = inference_engine.update_hot_tensor_and_return_inference_item(processing_tickers=tickers, new_quote_data=trading_data, update=update_flag)
+
+
+
             profit_logits, accuracy_logits = inference_engine.infer(inference_item)
 
             # --- Trading Logic ---
@@ -379,29 +421,30 @@ def main():
                     print(f"  >>> ✅ Agreement found! Attempting trade for {ticker}")
                     entry_price = round(trading_data[ticker]["close"], 2)
                     
-                    # parent_order_id = app.place_bracket_order_with_maturity(
-                    #     ticker=ticker, take_profit_float=take_profit, stop_loss_float=stop_loss,
-                    #     entry_price=entry_price, quantity=order_quantity
-                    # )
+                    parent_order_id = app.place_bracket_order_with_maturity(
+                        ticker=ticker, take_profit_float=take_profit, stop_loss_float=stop_loss,
+                        entry_price=entry_price, quantity=order_quantity
+                    )
                     
-                    # if parent_order_id:
-                    #     print(f"    --> ✅ Bracket order submitted with Parent ID: {parent_order_id}")
-                    #     expiry_time = now_utc + timedelta(seconds=frequency_limiter_seconds)
-                    #     trade_cooldown_expiry[ticker] = expiry_time
-                    #     print(f"    --> ⏳ {ticker} is now in cooldown until {expiry_time.strftime('%H:%M:%S')} UTC.")
-                    # else:
-                    #     print(f"    --> ℹ️ Order for {ticker} was not submitted (risk limits, etc.).")
-            
-            time.sleep(3)
+                    if parent_order_id:
+                        print(f"    --> ✅ Bracket order submitted with Parent ID: {parent_order_id}")
+                        expiry_time = now_utc + timedelta(seconds=frequency_limiter_seconds)
+                        trade_cooldown_expiry[ticker] = expiry_time
+                        print(f"    --> ⏳ {ticker} is now in cooldown until {expiry_time.strftime('%H:%M:%S')} UTC.")
+                    else:
+                        print(f"    --> ℹ️ Order for {ticker} was not submitted (risk limits, etc.).")
+            inference_engine.visualize_inference_tensor(inference_item, "ouput_inference_tensor.png")
+            inference_engine.visualize_ohlcv_buffers( "ouput_ohlcv_buffer.png")
+            time.sleep(4)
 
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
         print("\n--- Initiating Shutdown Sequence ---")
-        # if app.isConnected():
-        #     app.liquidate_all_positions()
-        # app.disconnect()
-        # print("Disconnected from TWS.")
+        if app.isConnected():
+            app.liquidate_all_positions()
+        app.disconnect()
+        print("Disconnected from TWS.")
 
 
         

@@ -14,6 +14,9 @@ from typing import Dict, List, Tuple, Union
 # ─── DB SETUP ──────────────────────────────────────────────────────────────────
 load_dotenv()
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+est_timezone = pytz.timezone('America/New_York')
+
+
 @dataclass
 class av_client:
     session: requests.Session = field(init=False)
@@ -393,74 +396,89 @@ def process_REALTIME_BULK_QUOTES(av: av_client, tickers: List[str], extended_hou
     # This is your API call to get the raw data
     raw_items = av.fetch_REALTIME_BULK_QUOTES(passed_arg, extended_hours)
 
-    # Check if the API returned any data
+     # Check if the API returned any data
     if not raw_items:
         print("Warning: API call returned no items.")
         return processed_data
 
+    # Helper function for robust float conversion with fallbacks
+    def _safe_float_conversion(value, fallback_value=0.0):
+        """
+        Attempts to convert a value to float.
+        If conversion fails (e.g., empty string, non-numeric string),
+        returns the specified fallback_value.
+        """
+        try:
+            # Handle empty string or string containing only whitespace
+            if isinstance(value, str) and value.strip() == '':
+                return fallback_value
+            return float(value)
+        except (ValueError, TypeError):
+            return fallback_value
+
     # Loop through each item (quote) returned by the API
     for item in raw_items:
-        # Safely get the symbol from the item dictionary
         symbol = item.get("symbol")
-        quote_details = {
-            "symbol": symbol,
-            "timestamp": datetime.strptime(item.get("timestamp"), "%Y-%m-%d %H:%M:%S.%f"),
-            "open": float(item.get("open", 0.0)),
-            "high": float(item.get("high", 0.0)),
-            "low": float(item.get("low", 0.0)),
-            "close": float(item.get("close", 0.0)),
-            "volume": int(item.get("volume", 0)),
-            "previous_close": float(item.get("previous_close", 0.0)),
-            "change": float(item.get("change", 0.0)),
-            "change_percent": item.get("change_percent"),  # Keep as string (e.g., "1.5%")
-        }
-        
+        if not symbol: # Skip if symbol is missing for some reason
+            print(f"Warning: Skipping item with no symbol: {item}")
+            continue
+
+        # --- Process previous_close first, as it's a fallback for OHLC ---
+        # It's crucial to get a reliable previous_close before parsing OHLC values.
+        # Default to 0.0 if previous_close from API is missing or invalid.
+        previous_close_val = _safe_float_conversion(item.get("previous_close"), 0.0)
+
+        quote_details = {}
+
+        # --- Timestamp conversion (can also fail if timestamp is bad) ---
+        timestamp_str = item.get("timestamp")
+        try:
+            naive_dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+            # Localize to EST (America/New_York)
+            est_aware_dt = est_timezone.localize(naive_dt)
+            # Convert to UTC for internal consistency
+            quote_details["timestamp"] = est_aware_dt.astimezone(pytz.utc)
+        except (ValueError, TypeError) as e:
+            print(f"Warning: Invalid timestamp format for {symbol}: '{timestamp_str}' ({e}). Using current EST time converted to UTC.")
+            # Fallback to current EST time, then convert to UTC
+            now_est = datetime.now(est_timezone)
+            quote_details["timestamp"] = now_est.astimezone(pytz.utc)
+
+
+        # --- Process OPEN, HIGH, LOW, CLOSE with fallback to previous_close ---
+        ohlc_keys = ["open", "high", "low", "close"]
+        for key in ohlc_keys:
+            # Try to get the actual value, if it's invalid (empty string, non-numeric),
+            # then _safe_float_conversion will return `previous_close_val`.
+            value_from_api = item.get(key)
+            processed_ohlc_value = _safe_float_conversion(value_from_api, previous_close_val)
+            quote_details[key] = processed_ohlc_value
+
+
+        # --- Process VOLUME ---
+        volume_from_api = item.get("volume")
+        try:
+            # Convert to float first to handle cases like "123.0" then to int
+            # `str(volume_from_api or 0)` handles None or empty string by making it "0"
+            quote_details["volume"] = float(str(volume_from_api) or 0)
+        except (ValueError, TypeError):
+            print(f"Warning: Invalid volume format for {symbol}: '{volume_from_api}'. Defaulting to 0.")
+            quote_details["volume"] = 0
+
+
+        # --- Process other float fields (change, percent, extended hours quotes) ---
+        # For these, if they are invalid, defaulting to 0.0 is usually appropriate.
+        other_float_keys = [
+            "change", "change_percent", "extended_hours_quote",
+            "extended_hours_change", "extended_hours_hange_percent"
+        ]
+        for key in other_float_keys:
+            value_from_api = item.get(key)
+            quote_details[key] = _safe_float_conversion(value_from_api, 0.0) # Default to 0.0 for these
+
+
         # Add the cleaned data to our main dictionary, keyed by the symbol
         processed_data[symbol] = quote_details
 
-    # print(f"Successfully processed data for {len(processed_data)} symbols.")
+    print(f"Successfully processed data for {len(processed_data)} symbols.")
     return processed_data
-
-
-# TODO:
-
-# def process_REALTIME_Intraday_QUOTES(av: av_client, ticker : str, extended_hours:bool) -> Dict[str, Dict]:
-#     # Initialize the dictionary to store the final organized data
-#     processed_data = {}
-
-#     def fetch_intraday(self, symbol: str, month: str, interval: str = "1min", outputsize: str= "compact", entitlement: str ="delayed", extended_hours: str ="false") -> dict:
-    
-#     # This is your API call to get the raw data
-#     raw_items = av.fetch_intraday(symbol=ticker, month: str, interval: str = "1min", outputsize: str= "compact", entitlement: str ="delayed", extended_hours: str ="false"))
-
-#     # Check if the API returned any data
-#     if not raw_items:
-#         print("Warning: API call returned no items.")
-#         return processed_data
-
-#     # Loop through each item (quote) returned by the API
-#     for item in raw_items:
-#         # Safely get the symbol from the item dictionary
-#         symbol = item.get("symbol")
-#         quote_details = {
-#             "symbol": symbol,
-#             "timestamp": datetime.strptime(item.get("timestamp"), "%Y-%m-%d %H:%M:%S.%f"),
-#             "open": float(item.get("open", 0.0)),
-#             "high": float(item.get("high", 0.0)),
-#             "low": float(item.get("low", 0.0)),
-#             "close": float(item.get("close", 0.0)),
-#             "volume": int(item.get("volume", 0)),
-#             "previous_close": float(item.get("previous_close", 0.0)),
-#             "change": float(item.get("change", 0.0)),
-#             "change_percent": item.get("change_percent"),  # Keep as string (e.g., "1.5%")
-#         }
-        
-#         # Add the cleaned data to our main dictionary, keyed by the symbol
-#         processed_data[symbol] = quote_details
-
-#     # print(f"Successfully processed data for {len(processed_data)} symbols.")
-#     return processed_data
-
-
-
-
