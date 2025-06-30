@@ -182,8 +182,3 @@ This section shows how often our predictions are simply correct or incorrect.
     * **Precision:** 54.60%
     * **Recall:** 88.74%
 * **Overall Accuracy for Run 10:** **56.62%**. (No improvement over best **67.67%**).
-
----
-## Conclusion:
-
-Both profitability and accuracy models have completed their evaluations. The best model states for both profit and accuracy have been saved.
