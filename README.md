@@ -90,6 +90,11 @@ Once all prerequisites are met and dependencies are installed:
 After initiation, the program is designed to automate the trading process by fetching real-time data, making trading decisions, and executing orders. It is intended to run autonomously.
 
 However, please be aware that despite automation, bugs or unexpected market conditions might occasionally leave positions unclosed. It is highly recommended to monitor the program's activity and your brokerage account regularly.
+**PORTFOLIO LIQUIDITY WARNING**
+If your portfolio allows for larger position sizes, accomodate it by editing exe_paras.json in position size order_quantity, we assume you ahve infinite position size such that the model will not factor in fixed transaction fee of $2.00[...] when putting in an order, as profitability sclaes linearly with reasonable position size (around 5- 200 shares).
+
+
+
 **Disclaimer 1**
 I have the $250 AV API key, which allows for 4 calls per second, if you purchase a cheaper plan, you will have to edit exe_params specifially  
 ```
@@ -183,7 +188,3 @@ This section shows how often our predictions are simply correct or incorrect.
     * **Recall:** 88.74%
 * **Overall Accuracy for Run 10:** **56.62%**. (No improvement over best **67.67%**).
 
----
-## Conclusion:
-
-Both profitability and accuracy models have completed their evaluations. The best model states for both profit and accuracy have been saved.

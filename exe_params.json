@@ -1,6 +1,6 @@
 {   
     "timezone_str": "US/Eastern",
-    "train_start": "2024-06-01 09:30:00",
+    "train_start": "2024-01-01 09:30:00",
     "train_end": "2025-06-14 09:30:00",
     "validation_start": "2025-05-15 09:30:00",
     "validation_end": "2025-05-15 16:30:00",

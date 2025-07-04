@@ -419,7 +419,7 @@ class RealTimeInferenceEngine:
             all_new_indicator_values[param_str] = normalized_series
 
         ### --- Step 4: Order Slices and Create Final NumPy Tensor --- ###
-        
+
         ordered_series_list = []
         for param_str in self.params:
             # Ensure each series added has the correct length (context_depth)
